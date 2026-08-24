@@ -1,0 +1,30 @@
+receivers:
+  hostmetrics:
+    collection_interval: 15s
+    scrapers:
+      cpu:
+      memory:
+      disk:
+      filesystem:
+      network:
+      load:
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+  resourcedetection:
+    detectors: [system]
+    system:
+      hostname_sources: [os]
+
+exporters:
+  otlphttp:
+    metrics_endpoint: "http://{{ monitoring_server_address }}:{{ victoriametrics_port }}/opentelemetry/v1/metrics"
+
+service:
+  pipelines:
+    metrics:
+      receivers: [hostmetrics]
+      processors: [resourcedetection, batch]
+      exporters: [otlphttp]

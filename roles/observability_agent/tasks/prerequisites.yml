@@ -1,0 +1,14 @@
+---
+- name: Ensure base directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: wheel
+    mode: '0755'
+  loop:
+    - "{{ base_dir }}"
+    - "{{ bin_dir }}"
+    - "{{ etc_dir }}"
+    - "{{ var_dir }}"
+    - "{{ log_dir }}"

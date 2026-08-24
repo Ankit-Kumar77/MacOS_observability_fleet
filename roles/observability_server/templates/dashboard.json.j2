@@ -1,0 +1,68 @@
+{
+  "title": "Mac Mini Fleet Overview",
+  "tags": ["macos", "otel", "hostmetrics"],
+  "timezone": "browser",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Active Hosts",
+      "gridPos": {"x": 0, "y": 0, "w": 4, "h": 4},
+      "targets": [
+        {
+          "expr": "count(system_cpu_time_seconds_total{state=\"idle\"}) by (host_name)",
+          "legendFormat": "{{host_name}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU Usage (%)",
+      "gridPos": {"x": 4, "y": 0, "w": 10, "h": 8},
+      "targets": [
+        {
+          "expr": "100 - (avg by (host_name) (rate(system_cpu_time_seconds_total{state=\"idle\"}[5m])) * 100)",
+          "legendFormat": "{{host_name}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory Usage (%)",
+      "gridPos": {"x": 14, "y": 0, "w": 10, "h": 8},
+      "targets": [
+        {
+          "expr": "(system_memory_usage_bytes{state=\"used\"} / sum by (host_name) (system_memory_usage_bytes)) * 100",
+          "legendFormat": "{{host_name}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Disk Usage (%)",
+      "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "(system_filesystem_usage_bytes{state=\"used\", mountpoint=\"/\"} / sum by (host_name) (system_filesystem_usage_bytes{mountpoint=\"/\"})) * 100",
+          "legendFormat": "{{host_name}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Network Traffic (bytes/sec)",
+      "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(system_network_io_bytes_total{direction=\"receive\"}[5m])",
+          "legendFormat": "{{host_name}} (Receive)"
+        },
+        {
+          "expr": "rate(system_network_io_bytes_total{direction=\"transmit\"}[5m])",
+          "legendFormat": "{{host_name}} (Transmit)"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 30,
+  "version": 3
+}

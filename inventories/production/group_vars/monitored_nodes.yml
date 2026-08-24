@@ -1,0 +1,3 @@
+# IMPORTANT: Verify these versions are current and compatible with your target environment before deploying.
+otel_collector_version: "0.98.0"
+otel_collector_download_url: "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v{{ otel_collector_version }}/otelcol-contrib_{{ otel_collector_version }}_darwin_arm64.tar.gz"

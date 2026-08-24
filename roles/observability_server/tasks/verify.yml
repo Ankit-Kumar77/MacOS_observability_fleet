@@ -1,0 +1,41 @@
+---
+- name: Wait for VictoriaMetrics to become ready
+  ansible.builtin.uri:
+    url: "http://localhost:{{ victoriametrics_port }}/health"
+    method: GET
+    status_code: 200
+  register: _vm_health
+  until: _vm_health.status == 200
+  retries: 5
+  delay: 5
+  tags: ['verify']
+
+- name: Wait for Grafana to become ready
+  ansible.builtin.uri:
+    url: "http://localhost:{{ grafana_port }}/api/health"
+    method: GET
+    status_code: 200
+  register: _grafana_health
+  until: _grafana_health.status == 200
+  retries: 5
+  delay: 5
+  tags: ['verify']
+
+- name: Verify Grafana datasource configuration exists
+  ansible.builtin.uri:
+    url: "http://localhost:{{ grafana_port }}/api/datasources"
+    url_username: admin
+    url_password: "{{ grafana_admin_password }}"
+    force_basic_auth: yes
+    method: GET
+    status_code: 200
+  register: _grafana_datasources
+  until: "'VictoriaMetrics' in _grafana_datasources.json | map(attribute='name') | list"
+  retries: 5
+  delay: 5
+  tags: ['verify']
+
+- name: Report server verification success
+  ansible.builtin.debug:
+    msg: "Monitoring server components (VictoriaMetrics and Grafana) are running and healthy. Datasource verified."
+  tags: ['verify']

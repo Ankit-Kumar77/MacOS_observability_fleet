@@ -1,0 +1,67 @@
+---
+- name: Download Grafana archive
+  ansible.builtin.get_url:
+    url: "{{ grafana_download_url }}"
+    dest: "/tmp/grafana.tar.gz"
+    mode: '0644'
+
+- name: Extract Grafana
+  ansible.builtin.unarchive:
+    src: "/tmp/grafana.tar.gz"
+    dest: "{{ base_dir }}"
+    remote_src: yes
+    extra_opts:
+      - --strip-components=1
+    creates: "{{ base_dir }}/grafana/bin/grafana-server"
+  notify: Restart Grafana
+
+- name: Generate Grafana configuration
+  ansible.builtin.template:
+    src: grafana.ini.j2
+    dest: "{{ etc_dir }}/grafana/grafana.ini"
+    owner: root
+    group: wheel
+    mode: '0644'
+  notify: Restart Grafana
+
+- name: Provision VictoriaMetrics datasource
+  ansible.builtin.template:
+    src: datasource.yml.j2
+    dest: "{{ etc_dir }}/grafana/provisioning/datasources/victoriametrics.yml"
+    owner: root
+    group: wheel
+    mode: '0644'
+  notify: Restart Grafana
+
+- name: Provision Grafana dashboard provider
+  ansible.builtin.template:
+    src: dashboard_provider.yml.j2
+    dest: "{{ etc_dir }}/grafana/provisioning/dashboards/provider.yml"
+    owner: root
+    group: wheel
+    mode: '0644'
+  notify: Restart Grafana
+
+- name: Provision default Mac Minis dashboard
+  ansible.builtin.template:
+    src: dashboard.json.j2
+    dest: "{{ etc_dir }}/grafana/provisioning/dashboards/mac_minis.json"
+    owner: root
+    group: wheel
+    mode: '0644'
+  notify: Restart Grafana
+
+- name: Generate Grafana launchd plist
+  ansible.builtin.template:
+    src: grafana.plist.j2
+    dest: /Library/LaunchDaemons/com.observability.grafana.plist
+    owner: root
+    group: wheel
+    mode: '0644'
+  notify: Restart Grafana
+
+- name: Ensure Grafana is started and enabled
+  ansible.builtin.service:
+    name: com.observability.grafana
+    state: started
+    enabled: yes

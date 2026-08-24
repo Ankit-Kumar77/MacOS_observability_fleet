@@ -1,0 +1,12 @@
+---
+- name: Configure observability server
+  hosts: monitoring_server
+  tags: ['server', 'observability']
+  roles:
+    - observability_server
+
+- name: Configure observability agents
+  hosts: monitored_nodes
+  tags: ['agent', 'observability']
+  roles:
+    - observability_agent

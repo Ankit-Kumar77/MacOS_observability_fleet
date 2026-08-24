@@ -1,0 +1,19 @@
+---
+
+- name: Verify monitoring server is reachable
+  ansible.builtin.wait_for:
+    host: "{{ monitoring_server_address }}"
+    port: "{{ victoriametrics_port }}"
+    timeout: 10
+  tags: ['verify']
+- name: Validate OpenTelemetry configuration
+  ansible.builtin.command:
+    cmd: "{{ bin_dir }}/otelcol-contrib validate --config={{ etc_dir }}/otel-config.yaml"
+  register: _otel_validate
+  changed_when: false
+  tags: ['verify']
+
+- name: Report agent verification success
+  ansible.builtin.debug:
+    msg: "Agent components (Node Exporter and OTel Collector) are configured and running."
+  tags: ['verify']

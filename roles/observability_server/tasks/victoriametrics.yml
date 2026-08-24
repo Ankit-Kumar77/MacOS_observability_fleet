@@ -1,0 +1,29 @@
+---
+- name: Download VictoriaMetrics archive
+  ansible.builtin.get_url:
+    url: "{{ victoriametrics_download_url }}"
+    dest: "/tmp/victoria-metrics.tar.gz"
+    mode: '0644'
+
+- name: Extract VictoriaMetrics
+  ansible.builtin.unarchive:
+    src: "/tmp/victoria-metrics.tar.gz"
+    dest: "{{ bin_dir }}"
+    remote_src: yes
+    creates: "{{ bin_dir }}/victoria-metrics-prod"
+  notify: Restart VictoriaMetrics
+
+- name: Generate VictoriaMetrics launchd plist
+  ansible.builtin.template:
+    src: victoriametrics.plist.j2
+    dest: /Library/LaunchDaemons/com.observability.victoriametrics.plist
+    owner: root
+    group: wheel
+    mode: '0644'
+  notify: Restart VictoriaMetrics
+
+- name: Ensure VictoriaMetrics is started and enabled
+  ansible.builtin.service:
+    name: com.observability.victoriametrics
+    state: started
+    enabled: yes

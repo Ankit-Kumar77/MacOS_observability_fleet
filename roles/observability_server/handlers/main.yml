@@ -1,0 +1,10 @@
+---
+- name: Restart VictoriaMetrics
+  ansible.builtin.service:
+    name: com.observability.victoriametrics
+    state: restarted
+
+- name: Restart Grafana
+  ansible.builtin.service:
+    name: com.observability.grafana
+    state: restarted

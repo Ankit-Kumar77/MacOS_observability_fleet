@@ -1,0 +1,11 @@
+[server]
+http_port = {{ grafana_port }}
+
+[security]
+admin_password = {{ grafana_admin_password }}
+
+[paths]
+data = {{ var_dir }}/grafana
+logs = {{ log_dir }}
+plugins = {{ var_dir }}/grafana/plugins
+provisioning = {{ etc_dir }}/grafana/provisioning

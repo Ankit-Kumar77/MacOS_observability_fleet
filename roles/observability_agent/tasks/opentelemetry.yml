@@ -1,0 +1,38 @@
+---
+- name: Download OpenTelemetry Collector archive
+  ansible.builtin.get_url:
+    url: "{{ otel_collector_download_url }}"
+    dest: "/tmp/otelcol.tar.gz"
+    mode: '0644'
+
+- name: Extract OpenTelemetry Collector
+  ansible.builtin.unarchive:
+    src: "/tmp/otelcol.tar.gz"
+    dest: "{{ bin_dir }}"
+    remote_src: yes
+    creates: "{{ bin_dir }}/otelcol-contrib"
+  notify: Restart OTel Collector
+
+- name: Generate OTel Collector configuration
+  ansible.builtin.template:
+    src: otel-config.yaml.j2
+    dest: "{{ etc_dir }}/otel-config.yaml"
+    owner: root
+    group: wheel
+    mode: '0644'
+  notify: Restart OTel Collector
+
+- name: Generate OTel Collector launchd plist
+  ansible.builtin.template:
+    src: otelcol.plist.j2
+    dest: /Library/LaunchDaemons/com.observability.otelcol.plist
+    owner: root
+    group: wheel
+    mode: '0644'
+  notify: Restart OTel Collector
+
+- name: Ensure OTel Collector is started and enabled
+  ansible.builtin.service:
+    name: com.observability.otelcol
+    state: started
+    enabled: yes

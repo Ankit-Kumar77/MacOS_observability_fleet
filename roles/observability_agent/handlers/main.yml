@@ -1,0 +1,6 @@
+---
+
+- name: Restart OTel Collector
+  ansible.builtin.service:
+    name: com.observability.otelcol
+    state: restarted

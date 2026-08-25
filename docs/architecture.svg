@@ -1,68 +1,77 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
-  <title id="title">Mac Mini observability architecture</title>
-  <desc id="desc">Apple Silicon Mac Minis run OpenTelemetry Collector hostmetrics. Collectors send metrics using OTLP over HTTP to VictoriaMetrics on a monitoring Mac Mini. Grafana visualizes the stored metrics.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" role="img" aria-labelledby="title description">
+  <title id="title">Mac Mini OpenTelemetry observability architecture</title>
+  <desc id="description">Each monitored Mac Mini runs an OpenTelemetry Collector with the hostmetrics receiver. Metrics travel over OTLP HTTP to VictoriaMetrics on a central monitoring Mac Mini, where Grafana visualizes them.</desc>
   <defs>
-    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#f8fbfd"/><stop offset="1" stop-color="#eef5f8"/></linearGradient>
-    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="9" markerHeight="9" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#176b87"/></marker>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="10" markerHeight="10" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#16647e"/>
+    </marker>
     <style>
-      text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; fill: #153144; }
-      .title { font-size: 34px; font-weight: 700; } .subtitle { font-size: 19px; fill: #526d7c; }
-      .container { fill: #ffffff; stroke: #9dbbc9; stroke-width: 2; } .container-head { fill: #153f57; }
-      .agent { fill: #e8f6f8; stroke: #53a2b5; stroke-width: 2; } .store { fill: #eaf1fe; stroke: #688cc1; stroke-width: 2; }
-      .label { font-size: 21px; font-weight: 700; } .body { font-size: 17px; fill: #4d6878; } .small { font-size: 15px; fill: #4d6878; } .on-dark { fill: #ffffff; }
-      .flow { fill: none; stroke: #176b87; stroke-width: 4; marker-end: url(#arrow); } .branch { fill: none; stroke: #176b87; stroke-width: 4; } .guide { fill: none; stroke: #91b1bf; stroke-width: 2; stroke-dasharray: 7 7; }
+      text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; fill: #173447; }
+      .page-title { font-size: 34px; font-weight: 700; }
+      .page-subtitle { font-size: 18px; fill: #597080; }
+      .group { fill: #ffffff; stroke: #7f9cab; stroke-width: 2; }
+      .group-head { fill: #173f55; }
+      .agent { fill: #f9fcfd; stroke: #8ca9b7; stroke-width: 2; }
+      .agent-head { fill: #e6f2f6; }
+      .component { fill: #edf7f9; stroke: #59a1b3; stroke-width: 2; }
+      .storage { fill: #edf3fc; stroke: #668cc2; stroke-width: 2; }
+      .heading { font-size: 23px; font-weight: 700; }
+      .component-title { font-size: 20px; font-weight: 700; }
+      .body { font-size: 17px; fill: #526c7b; }
+      .small { font-size: 15px; fill: #526c7b; }
+      .on-dark { fill: #ffffff; }
+      .flow { fill: none; stroke: #16647e; stroke-width: 4; marker-end: url(#arrow); }
     </style>
   </defs>
 
-  <rect width="1600" height="900" fill="url(#background)"/>
-  <text x="90" y="88" class="title">Mac Mini Observability</text>
-  <text x="90" y="122" class="subtitle">OpenTelemetry-native host metrics for Apple Silicon macOS</text>
+  <rect width="1600" height="1000" fill="#f7fafc"/>
+  <text x="90" y="72" class="page-title">Mac Mini Observability</text>
+  <text x="90" y="104" class="page-subtitle">Every Mac Mini sends host metrics to one central monitoring Mac.</text>
 
-  <rect x="80" y="205" width="570" height="500" rx="18" class="container"/>
-  <rect x="80" y="205" width="570" height="72" rx="18" class="container-head"/>
-  <text x="365" y="250" text-anchor="middle" class="on-dark" font-size="24" font-weight="700">Monitored Mac Minis</text>
-  <text x="365" y="312" text-anchor="middle" class="body">One collector on every monitored Mac</text>
+  <!-- Central monitoring system -->
+  <rect x="410" y="145" width="780" height="405" rx="16" class="group"/>
+  <rect x="410" y="145" width="780" height="68" rx="16" class="group-head"/>
+  <text x="800" y="188" text-anchor="middle" class="heading on-dark">MONITORING MAC</text>
 
-  <rect x="120" y="356" width="220" height="250" rx="13" class="agent"/>
-  <text x="230" y="397" text-anchor="middle" class="label">Mac Mini 02</text>
-  <rect x="145" y="430" width="170" height="100" rx="9" fill="#ffffff" stroke="#89bfca" stroke-width="1.5"/>
-  <text x="230" y="467" text-anchor="middle" class="label" font-size="18">OTel Collector</text>
-  <text x="230" y="496" text-anchor="middle" class="body">hostmetrics</text>
-  <text x="230" y="570" text-anchor="middle" class="small">CPU / memory / disk</text>
+  <rect x="620" y="255" width="360" height="100" rx="10" class="storage"/>
+  <text x="800" y="297" text-anchor="middle" class="heading">VictoriaMetrics</text>
+  <text x="800" y="326" text-anchor="middle" class="body">stores host metrics / port 8428</text>
 
-  <rect x="390" y="356" width="220" height="250" rx="13" class="agent"/>
-  <text x="500" y="397" text-anchor="middle" class="label">Mac Mini 03 through N</text>
-  <rect x="415" y="430" width="170" height="100" rx="9" fill="#ffffff" stroke="#89bfca" stroke-width="1.5"/>
-  <text x="500" y="467" text-anchor="middle" class="label" font-size="18">OTel Collector</text>
-  <text x="500" y="496" text-anchor="middle" class="body">hostmetrics</text>
-  <text x="500" y="570" text-anchor="middle" class="small">same agent role</text>
+  <path d="M800 355 V405" class="flow"/>
+  <text x="825" y="388" class="small">metrics</text>
 
-  <path d="M340 480 H365 V650 H740" class="branch"/>
-  <path d="M500 606 V650 H740 V480 H840" class="flow"/>
-  <text x="665" y="620" text-anchor="middle" class="body">OTLP / HTTP</text>
-  <text x="665" y="642" text-anchor="middle" class="small">/opentelemetry/v1/metrics</text>
+  <rect x="620" y="420" width="360" height="100" rx="10" class="storage"/>
+  <text x="800" y="462" text-anchor="middle" class="heading">Grafana</text>
+  <text x="800" y="491" text-anchor="middle" class="body">visualizes metrics / port 3000</text>
 
-  <rect x="800" y="205" width="700" height="500" rx="18" class="container"/>
-  <rect x="800" y="205" width="700" height="72" rx="18" class="container-head"/>
-  <text x="1150" y="250" text-anchor="middle" class="on-dark" font-size="24" font-weight="700">Monitoring Mac Mini</text>
+  <!-- Three identical monitored Mac cards -->
+  <rect x="90" y="735" width="350" height="205" rx="14" class="agent"/>
+  <rect x="90" y="735" width="350" height="54" rx="14" class="agent-head"/>
+  <text x="265" y="770" text-anchor="middle" class="component-title">Mac Mini 01</text>
+  <rect x="125" y="818" width="280" height="82" rx="9" class="component"/>
+  <text x="265" y="852" text-anchor="middle" class="component-title">OpenTelemetry Collector</text>
+  <text x="265" y="880" text-anchor="middle" class="body">hostmetrics receiver</text>
 
-  <rect x="850" y="350" width="290" height="175" rx="13" class="store"/>
-  <text x="995" y="402" text-anchor="middle" class="label">VictoriaMetrics</text>
-  <text x="995" y="436" text-anchor="middle" class="body">OTLP/HTTP ingestion</text>
-  <text x="995" y="468" text-anchor="middle" class="body">port 8428</text>
-  <text x="995" y="501" text-anchor="middle" class="small">metric storage</text>
+  <rect x="625" y="735" width="350" height="205" rx="14" class="agent"/>
+  <rect x="625" y="735" width="350" height="54" rx="14" class="agent-head"/>
+  <text x="800" y="770" text-anchor="middle" class="component-title">Mac Mini 02</text>
+  <rect x="660" y="818" width="280" height="82" rx="9" class="component"/>
+  <text x="800" y="852" text-anchor="middle" class="component-title">OpenTelemetry Collector</text>
+  <text x="800" y="880" text-anchor="middle" class="body">hostmetrics receiver</text>
 
-  <rect x="1210" y="350" width="240" height="175" rx="13" class="store"/>
-  <text x="1330" y="402" text-anchor="middle" class="label">Grafana</text>
-  <text x="1330" y="436" text-anchor="middle" class="body">dashboards</text>
-  <text x="1330" y="468" text-anchor="middle" class="body">port 3000</text>
-  <text x="1330" y="501" text-anchor="middle" class="small">VictoriaMetrics datasource</text>
+  <rect x="1160" y="735" width="350" height="205" rx="14" class="agent"/>
+  <rect x="1160" y="735" width="350" height="54" rx="14" class="agent-head"/>
+  <text x="1335" y="770" text-anchor="middle" class="component-title">Mac Mini N</text>
+  <rect x="1195" y="818" width="280" height="82" rx="9" class="component"/>
+  <text x="1335" y="852" text-anchor="middle" class="component-title">OpenTelemetry Collector</text>
+  <text x="1335" y="880" text-anchor="middle" class="body">hostmetrics receiver</text>
 
-  <path d="M1140 438 H1200" class="flow"/>
-  <text x="1168" y="414" text-anchor="middle" class="small">query</text>
-  <path d="M850 575 H1450" class="guide"/>
-  <text x="1150" y="625" text-anchor="middle" class="body">Inventory supplies the monitoring-server address to every collector.</text>
-  <text x="1150" y="658" text-anchor="middle" class="small">Pipeline: hostmetrics -&gt; resourcedetection -&gt; batch -&gt; otlphttp -&gt; VictoriaMetrics</text>
+  <!-- Shared OTLP/HTTP route. The trunk stays outside both containers. -->
+  <path d="M265 735 V655" class="flow"/>
+  <path d="M800 735 V655" class="flow"/>
+  <path d="M1335 735 V655 H265 V305 H620" class="flow"/>
+  <text x="800" y="620" text-anchor="middle" class="component-title">OTLP / HTTP</text>
+  <text x="800" y="645" text-anchor="middle" class="small">/opentelemetry/v1/metrics</text>
 
-  <text x="90" y="810" class="small">All services are installed and managed on macOS with the existing Ansible roles and launchd plists.</text>
+  <text x="800" y="980" text-anchor="middle" class="small">Data flow: Mac Mini -&gt; OpenTelemetry Collector -&gt; hostmetrics -&gt; OTLP/HTTP -&gt; VictoriaMetrics -&gt; Grafana</text>
 </svg>

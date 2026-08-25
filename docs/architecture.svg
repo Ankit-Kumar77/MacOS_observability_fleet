@@ -69,7 +69,9 @@
   <!-- Shared OTLP/HTTP route. The trunk stays outside both containers. -->
   <path d="M265 735 V655" class="flow"/>
   <path d="M800 735 V655" class="flow"/>
-  <path d="M1335 735 V655 H265 V305 H620" class="flow"/>
+  <path d="M1335 735 V655" class="flow"/>
+  <path d="M1335 655 H265" class="flow"/>
+  <path d="M265 655 V305 H620" class="flow"/>
   <text x="800" y="620" text-anchor="middle" class="component-title">OTLP / HTTP</text>
   <text x="800" y="645" text-anchor="middle" class="small">/opentelemetry/v1/metrics</text>
 

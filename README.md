@@ -1,117 +1,145 @@
 # Mac Mini Observability
 
-An Ansible project for collecting host metrics from Apple Silicon Mac Minis and presenting them through VictoriaMetrics and Grafana. It is designed for one monitoring Mac Mini and a fleet of monitored Mac Minis, without Ansible Galaxy dependencies.
+Ansible automation for host-metric observability on Apple Silicon Mac Minis. One monitoring Mac Mini runs VictoriaMetrics and Grafana; every monitored Mac Mini runs an OpenTelemetry Collector.
 
 ## Architecture
 
 ![Mac Mini observability architecture](docs/architecture.svg)
 
-Each monitored Mac runs `otelcol-contrib`. Its metrics pipeline is:
+The metric path is:
 
-`hostmetrics -> resourcedetection -> batch -> otlphttp -> VictoriaMetrics`
+`hostmetrics -> resourcedetection -> batch -> otlphttp -> VictoriaMetrics -> Grafana`
 
-The collector sends OTLP/HTTP metrics to `http://<inventory-derived-server>:8428/opentelemetry/v1/metrics`. VictoriaMetrics stores the data and Grafana queries VictoriaMetrics for the supplied host dashboard. There is no Prometheus server or Prometheus-specific Collector component in this design.
+Each collector sends OTLP/HTTP to `http://<monitoring-server-address>:8428/opentelemetry/v1/metrics`. There is no Prometheus server or Prometheus-specific Collector component in this design.
 
-## Repository structure
+## Before deployment
 
-```text
-.
-|- ansible.cfg
-|- site.yml
-|- inventories/production/
-|  |- hosts.yml
-|  `- group_vars/
-|     |- all.yml
-|     |- monitoring_server.yml
-|     `- monitored_nodes.yml
-|- roles/
-|  |- observability_server/
-|  `- observability_agent/
-`- docs/architecture.svg
+You need:
+
+- A control machine with Ansible installed and network access to the target Macs.
+- Apple Silicon Macs running macOS, with SSH enabled.
+- An Ansible SSH user on every Mac with sudo permission.
+- One Mac selected as the monitoring server and at least one separate Mac selected as a monitored node.
+- The hostname or reachable address, SSH user, and SSH authentication method for each Mac.
+- Network access from monitored Macs to the monitoring Mac on port `8428`; browser access to Grafana on port `3000` as required.
+
+Use SSH keys where possible. Confirm connectivity before deployment:
+
+```bash
+ansible all -i inventories/production/hosts.yml -m ping
 ```
 
-`observability_server` installs VictoriaMetrics and Grafana, provisions the datasource and dashboard, and renders their launchd plists. `observability_agent` installs the Apple Silicon `otelcol-contrib` release, renders the OTLP/HTTP pipeline, and renders its launchd plist.
+## Prepare the inventory
 
-## Inventory and variables
+Edit [inventories/production/hosts.yml](inventories/production/hosts.yml). Define exactly one host in `monitoring_server` and put each collector host in `monitored_nodes`.
 
-Define exactly one host in `monitoring_server` and all collectors in `monitored_nodes` in [inventories/production/hosts.yml](inventories/production/hosts.yml). Replace only the placeholder `ansible_host` and `ansible_user` values with your environment values. `monitoring_server_address` is derived from the first monitoring-server inventory host, so agent configuration contains no server IP address.
+```yaml
+all:
+  children:
+    monitoring_server:
+      hosts:
+        monitoring-mac:
+          ansible_host: <monitoring-mac-address>
+          ansible_user: <ssh-user>
+    monitored_nodes:
+      hosts:
+        agent-mac-01:
+          ansible_host: <agent-mac-address>
+          ansible_user: <ssh-user>
+```
 
-Shared paths and the VictoriaMetrics port are in `group_vars/all.yml`. Server-specific versions, Grafana port, and the Grafana password reference are in `group_vars/monitoring_server.yml`. The collector version and its Darwin ARM64 release URL are in `group_vars/monitored_nodes.yml`.
+The agents derive `monitoring_server_address` from the monitoring-server inventory entry. Do not put real production addresses or credentials in source-controlled variable files.
 
-## Components
+## First-time setup: one monitoring Mac and one agent Mac
 
-### OpenTelemetry Collector
+Start with one of each. Do not scale out until this flow succeeds on physical Macs.
 
-The configured release URL resolves to `otelcol-contrib_<version>_darwin_arm64.tar.gz`, the Apple Silicon macOS distribution. The role extracts the expected `otelcol-contrib` executable to `/opt/observability/bin/otelcol-contrib`, asserts that it exists, and uses that exact path in `com.observability.otelcol.plist`.
-
-The rendered config is `/opt/observability/etc/otel-config.yaml`, which is also the plist config argument. It uses the `hostmetrics` receiver; `resourcedetection` and `batch` processors; and the `otlphttp` exporter. The agent verification task runs `otelcol-contrib validate` against that rendered file. The selected contrib distribution is the required component-bearing distribution for these components.
-
-### VictoriaMetrics
-
-VictoriaMetrics is installed as `/opt/observability/bin/victoria-metrics-prod`. Its plist uses the same executable, stores data in `/opt/observability/var/victoriametrics`, writes launchd output under `/opt/observability/var/log`, and listens on the shared `victoriametrics_port` (default `8428`). This is the port used by the collector's OTLP endpoint.
-
-### Grafana
-
-Grafana is extracted beneath `/opt/observability/grafana`, matching both its plist `WorkingDirectory` and server executable path. Its configuration and provisioning files live under `/opt/observability/etc/grafana`. The provisioned VictoriaMetrics datasource points to the local VictoriaMetrics listener. The dashboard uses collector-emitted host-metric names for CPU, memory, filesystem, and network data.
-
-## Prerequisites
-
-- Ansible installed on the control node.
-- SSH connectivity and a sudo-capable Ansible account on each target Mac.
-- Apple Silicon macOS targets with outbound access to the configured release URLs during installation.
-- Network access from monitored nodes to the monitoring server on port `8428`, and from Grafana users to port `3000` as appropriate.
-- A Grafana admin password provided through Ansible Vault; do not commit a real password.
-
-## Deployment
-
-1. Set the inventory host addresses and users.
-2. Create an encrypted password variable, for example:
+1. **Prepare the monitoring Mac.** Confirm SSH and sudo access, and ensure ports `8428` and `3000` are available.
+2. **Configure inventory.** Add the monitoring Mac and one agent as shown above.
+3. **Provide the Grafana password.** Store it with Ansible Vault, for example:
 
    ```bash
    ansible-vault encrypt_string 'replace-with-a-strong-password' --name 'vault_grafana_admin_password'
    ```
 
-   Store the resulting variable in an encrypted vars file available to the playbook.
-3. Check connectivity:
-
-   ```bash
-   ansible all -i inventories/production/hosts.yml -m ping
-   ```
-4. Deploy the monitoring server:
+   Make the resulting vaulted variable available to the playbook. The server group references `vault_grafana_admin_password`.
+4. **Run the server setup.**
 
    ```bash
    ansible-playbook -i inventories/production/hosts.yml site.yml --tags server --ask-become-pass --ask-vault-pass
    ```
-5. Test one agent first (replace the limit with an inventory alias):
+5. **Verify VictoriaMetrics.** On the monitoring Mac, check `http://localhost:8428/health` and review `/opt/observability/var/log/victoriametrics.err.log` if it does not respond.
+6. **Verify Grafana.** Open `http://<monitoring-mac-address>:3000`, sign in with the configured password, and confirm the VictoriaMetrics datasource is present.
+7. **Prepare the agent Mac.** Confirm SSH/sudo access and that it can reach the monitoring Mac on port `8428`.
+8. **Run the agent setup.** Replace the limit with your agent inventory alias.
 
    ```bash
-   ansible-playbook -i inventories/production/hosts.yml site.yml --limit mac-mini-02 --tags agent --ask-become-pass --ask-vault-pass
+   ansible-playbook -i inventories/production/hosts.yml site.yml --limit agent-mac-01 --tags agent --ask-become-pass --ask-vault-pass
    ```
-6. Verify data is present in Grafana at `http://<monitoring-server-address>:3000`, then deploy the remaining agents:
+9. **Verify the collector.** On the agent, run:
+
+   ```bash
+   sudo /opt/observability/bin/otelcol-contrib validate --config=/opt/observability/etc/otel-config.yaml
+   ```
+
+   Then review `/opt/observability/var/log/otelcol.err.log` if needed.
+10. **Verify end-to-end metrics.** Confirm VictoriaMetrics remains healthy, then open the provisioned Grafana dashboard and check that the agent host appears.
+
+## Scale to N Mac Minis
+
+After the first monitoring-and-agent test works:
+
+1. Add each additional Mac to `monitored_nodes` in the inventory, using its own placeholder-replaced address and SSH user.
+2. Apply the same agent role to all monitored nodes:
 
    ```bash
    ansible-playbook -i inventories/production/hosts.yml site.yml --tags agent --ask-become-pass --ask-vault-pass
    ```
+3. Target one host during troubleshooting or staged rollout:
 
-To scale to 40 Mac Minis, add their inventory entries under `monitored_nodes` and repeat the agent deployment. The role is intended to be idempotent: archives use binary existence guards, and rendered files notify services only when their content changes.
+   ```bash
+   ansible-playbook -i inventories/production/hosts.yml site.yml --limit agent-mac-02 --tags agent --ask-become-pass --ask-vault-pass
+   ```
+4. Check the Grafana fleet dashboard for all hosts.
 
-## macOS and launchd
+The `observability_agent` role is reused unchanged for any number of monitored Mac Minis, including a fleet of approximately 40.
 
-The project intentionally uses the existing launchd approach: plists are written to `/Library/LaunchDaemons` and managed through Ansible's service interface. No service-management redesign is included. The binary, configuration, storage, port, and log paths have been checked for internal consistency, but launchd bootstrap, restart, ownership, and runtime behavior must be tested on the first real Mac Mini.
+## What the project installs
 
-## Validation and troubleshooting
+| Role | Target | Installed/configured components |
+| --- | --- | --- |
+| `observability_server` | `monitoring_server` | VictoriaMetrics, Grafana, datasource/dashboard provisioning, launchd plists |
+| `observability_agent` | `monitored_nodes` | `otelcol-contrib`, host-metric pipeline, launchd plist |
 
-Run static checks from the repository root:
+Software, configuration, data, and logs are placed under `/opt/observability`. The project uses the existing macOS launchd approach with plists in `/Library/LaunchDaemons`.
 
-```bash
-ansible-playbook -i inventories/production/hosts.yml site.yml --syntax-check
-ansible-lint
-```
+## Troubleshooting
 
-The playbook also validates the rendered collector configuration on a target and checks VictoriaMetrics and Grafana health endpoints. Before real Mac access, local validation can confirm YAML, Jinja rendering, variable references, Ansible syntax, and static configuration consistency. It cannot confirm macOS archive behavior, collector component availability at runtime, downloads, launchd operation, firewall policy, or end-to-end ingestion.
-
-If deployment fails, first check SSH/sudo access, the inventory-derived monitoring-server address, port `8428` reachability from an agent, release URL availability, and `/opt/observability/var/log` on the target. If Grafana is healthy but has no data, run the collector validation command shown in the agent verification task and inspect the collector output log.
+| Problem | First checks |
+| --- | --- |
+| SSH or Ansible cannot connect | Confirm `ansible_host`, `ansible_user`, SSH keys, and `ansible all -m ping`. |
+| Collector does not start | Validate `/opt/observability/etc/otel-config.yaml`; inspect `otelcol.err.log`; confirm the collector binary exists. |
+| VictoriaMetrics does not start | Check the binary, port `8428`, and `victoriametrics.err.log`. |
+| Grafana does not start | Check the binary, port `3000`, configuration path, and `grafana.err.log`. |
+| Metrics do not appear | Check the collector log, agent-to-server access on `8428`, VictoriaMetrics health, then Grafana datasource/dashboard. |
+| launchd or plist issue | Use [LAUNCHD_TROUBLESHOOTING.md](LAUNCHD_TROUBLESHOOTING.md) for plist validation, service status, logs, and safe recovery commands. |
+| Incorrect path or port conflict | Compare the plist `ProgramArguments` with the files under `/opt/observability`; use `lsof` to identify a listener on ports `8428` or `3000`. |
 
 ## Security
 
-Keep credentials in Ansible Vault or an equivalent secret source, restrict SSH keys and sudo permissions to the required operators, and limit network access to the two service ports. Use TLS and authentication appropriate to the network boundary before exposing either service outside a trusted management network.
+- Never commit real passwords, private keys, or credentials.
+- Use Ansible Vault for the Grafana password and any other secret values.
+- Keep inventory addresses environment-specific and avoid hard-coding production infrastructure into roles or templates.
+- Restrict SSH, sudo access, and network exposure of ports `8428` and `3000` to the required users and networks.
+
+## Validation limits
+
+Before physical Macs are available, YAML, Jinja templates, plist XML, SVG, dashboard JSON, variable references, and Ansible syntax can be checked locally when the tools are installed.
+
+Physical Apple Silicon Mac Minis are required to validate archive execution, launchd bootstrap/restart behavior, file ownership at runtime, network policy, service health, and end-to-end metric ingestion. This project must not be considered production-tested until the one-monitoring-Mac plus one-agent-Mac test succeeds.
+
+## More documentation
+
+- [Project internal flow](docs/PROJECT_FLOW.md)
+- [Confluence-ready project overview](docs/project-overview.md)
+- [launchd troubleshooting](LAUNCHD_TROUBLESHOOTING.md)

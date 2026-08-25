@@ -8,7 +8,7 @@
 - name: Extract Grafana
   ansible.builtin.unarchive:
     src: "/tmp/grafana.tar.gz"
-    dest: "{{ base_dir }}"
+    dest: "{{ base_dir }}/grafana"
     remote_src: yes
     extra_opts:
       - --strip-components=1

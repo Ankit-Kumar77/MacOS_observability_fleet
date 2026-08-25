@@ -6,6 +6,7 @@ bin_dir: "{{ base_dir }}/bin"
 etc_dir: "{{ base_dir }}/etc"
 var_dir: "{{ base_dir }}/var"
 log_dir: "{{ var_dir }}/log"
+victoriametrics_port: 8428
 
 # The address of the monitoring server.
 # Dynamically derived from the first host in the monitoring_server group.

@@ -13,6 +13,18 @@
     creates: "{{ bin_dir }}/otelcol-contrib"
   notify: Restart OTel Collector
 
+- name: Confirm OpenTelemetry Collector binary was extracted
+  ansible.builtin.stat:
+    path: "{{ bin_dir }}/otelcol-contrib"
+  register: _otelcol_binary
+
+- name: Assert OpenTelemetry Collector binary is available
+  ansible.builtin.assert:
+    that:
+      - _otelcol_binary.stat.exists
+      - _otelcol_binary.stat.isreg
+    fail_msg: "The otelcol-contrib archive did not extract {{ bin_dir }}/otelcol-contrib."
+
 - name: Generate OTel Collector configuration
   ansible.builtin.template:
     src: otel-config.yaml.j2

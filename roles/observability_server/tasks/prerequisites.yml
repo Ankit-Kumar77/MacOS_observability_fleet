@@ -13,6 +13,8 @@
     - "{{ var_dir }}"
     - "{{ log_dir }}"
     - "{{ var_dir }}/victoriametrics"
+    - "{{ var_dir }}/grafana"
+    - "{{ var_dir }}/grafana/plugins"
     - "{{ base_dir }}/grafana"
     - "{{ etc_dir }}/grafana/provisioning/datasources"
     - "{{ etc_dir }}/grafana/provisioning/dashboards"

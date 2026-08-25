@@ -15,5 +15,5 @@
 
 - name: Report agent verification success
   ansible.builtin.debug:
-    msg: "Agent components (Node Exporter and OTel Collector) are configured and running."
+    msg: "OpenTelemetry Collector is configured and its configuration is valid."
   tags: ['verify']

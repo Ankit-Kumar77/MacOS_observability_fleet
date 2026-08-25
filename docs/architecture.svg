@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 720" role="img" aria-labelledby="title description">
+  <title id="title">Mac Mini observability architecture</title>
+  <desc id="description">Mac Minis collect host metrics through OpenTelemetry Collectors and send them over OTLP HTTP to VictoriaMetrics. Grafana queries VictoriaMetrics.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1"><stop stop-color="#f7fafc"/><stop offset="1" stop-color="#edf4f8"/></linearGradient>
+    <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto"><path d="M1 1 L10 5.5 L1 10z" fill="#206a86"/></marker>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #152b3c; }
+      .label { font-size: 21px; font-weight: 700; } .small { font-size: 17px; fill: #456071; } .tiny { font-size: 15px; fill: #456071; }
+      .node { fill: #fff; stroke: #9cb9c8; stroke-width: 2; } .server { fill: #fff; stroke: #367995; stroke-width: 2.5; }
+      .header { fill: #173c52; } .agent { fill: #e8f5f8; stroke: #58a5b8; stroke-width: 1.5; } .service { fill: #edf4ff; stroke: #7597c5; stroke-width: 1.5; }
+      .flow { fill: none; stroke: #206a86; stroke-width: 3; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect width="1440" height="720" fill="url(#bg)"/>
+  <text x="72" y="76" font-size="32" font-weight="700">Mac Mini Observability</text>
+  <text x="72" y="110" class="small">OpenTelemetry-native host metrics pipeline</text>
+
+  <rect x="70" y="190" width="330" height="350" rx="14" class="node"/>
+  <rect x="70" y="190" width="330" height="64" rx="14" class="header"/>
+  <text x="235" y="231" text-anchor="middle" fill="#fff" font-size="22" font-weight="700">Mac Mini 01</text>
+  <rect x="104" y="295" width="262" height="90" rx="10" class="agent"/>
+  <text x="235" y="332" text-anchor="middle" class="label">OpenTelemetry Collector</text>
+  <text x="235" y="361" text-anchor="middle" class="small">hostmetrics receiver</text>
+  <text x="235" y="444" text-anchor="middle" class="tiny">CPU / memory / disk / filesystem / network / load</text>
+
+  <rect x="470" y="190" width="330" height="350" rx="14" class="node"/>
+  <rect x="470" y="190" width="330" height="64" rx="14" class="header"/>
+  <text x="635" y="231" text-anchor="middle" fill="#fff" font-size="22" font-weight="700">Mac Mini 02 through N</text>
+  <rect x="504" y="295" width="262" height="90" rx="10" class="agent"/>
+  <text x="635" y="332" text-anchor="middle" class="label">OpenTelemetry Collector</text>
+  <text x="635" y="361" text-anchor="middle" class="small">hostmetrics receiver</text>
+  <text x="635" y="444" text-anchor="middle" class="tiny">resourcedetection -&gt; batch -&gt; otlphttp</text>
+
+  <rect x="950" y="142" width="420" height="455" rx="14" class="server"/>
+  <rect x="950" y="142" width="420" height="64" rx="14" class="header"/>
+  <text x="1160" y="183" text-anchor="middle" fill="#fff" font-size="22" font-weight="700">Monitoring Mac Mini</text>
+  <rect x="993" y="255" width="334" height="100" rx="10" class="service"/>
+  <text x="1160" y="294" text-anchor="middle" class="label">VictoriaMetrics</text>
+  <text x="1160" y="324" text-anchor="middle" class="small">OTLP/HTTP ingestion / :8428</text>
+  <rect x="993" y="430" width="334" height="100" rx="10" class="service"/>
+  <text x="1160" y="469" text-anchor="middle" class="label">Grafana</text>
+  <text x="1160" y="499" text-anchor="middle" class="small">VictoriaMetrics datasource / :3000</text>
+
+  <path d="M400 340 H915 V305 H983" class="flow"/>
+  <path d="M800 340 H915" class="flow"/>
+  <rect x="750" y="277" width="164" height="36" rx="18" fill="#fff" stroke="#78a8bb"/>
+  <text x="832" y="301" text-anchor="middle" class="tiny">OTLP/HTTP</text>
+  <text x="833" y="334" text-anchor="middle" class="tiny">/opentelemetry/v1/metrics</text>
+  <path d="M1160 430 V368" class="flow"/>
+  <text x="1180" y="404" class="tiny">query</text>
+  <text x="72" y="660" class="tiny">Inventory supplies the monitoring-server address; collectors send OTLP/HTTP directly to VictoriaMetrics.</text>
+</svg>

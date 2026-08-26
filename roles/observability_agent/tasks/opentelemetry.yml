@@ -1,50 +1,57 @@
 ---
-- name: Download OpenTelemetry Collector archive
-  ansible.builtin.get_url:
-    url: "{{ otel_collector_download_url }}"
-    dest: "/tmp/otelcol.tar.gz"
-    mode: '0644'
+- name: Install the OpenTelemetry Collector release
+  ansible.builtin.include_role:
+    name: observability_common
+    tasks_from: install_versioned_archive
+  vars:
+    observability_archive_component: OpenTelemetry Collector
+    observability_archive_url: "{{ otel_collector_download_url }}"
+    observability_archive_checksum: "{{ otel_collector_checksum }}"
+    observability_archive_tmp_path: "/tmp/otelcol-contrib-{{ otel_collector_version }}.tar.gz"
+    observability_archive_install_dir: "{{ otel_collector_install_dir }}"
+    observability_archive_binary_path: "{{ otel_collector_install_dir }}/otelcol-contrib"
 
-- name: Extract OpenTelemetry Collector
-  ansible.builtin.unarchive:
-    src: "/tmp/otelcol.tar.gz"
-    dest: "{{ bin_dir }}"
-    remote_src: yes
-    creates: "{{ bin_dir }}/otelcol-contrib"
+# The symlink flip -- not the extraction -- is the moment the running version
+# changes, which is why the restart is notified from here.
+- name: Point the active OpenTelemetry Collector binary at this version
+  ansible.builtin.file:
+    src: "{{ otel_collector_install_dir }}/otelcol-contrib"
+    dest: "{{ bin_dir }}/otelcol-contrib"
+    state: link
+    owner: root
+    group: wheel
+    follow: false
+    force: true
   notify: Restart OTel Collector
 
-- name: Confirm OpenTelemetry Collector binary was extracted
-  ansible.builtin.stat:
-    path: "{{ bin_dir }}/otelcol-contrib"
-  register: _otelcol_binary
-
-- name: Assert OpenTelemetry Collector binary is available
-  ansible.builtin.assert:
-    that:
-      - _otelcol_binary.stat.exists
-      - _otelcol_binary.stat.isreg
-    fail_msg: "The otelcol-contrib archive did not extract {{ bin_dir }}/otelcol-contrib."
-
+# 0600: this file carries the VictoriaMetrics basic-auth password when
+# victoriametrics_auth_enabled is true. no_log keeps it out of --diff output.
 - name: Generate OTel Collector configuration
   ansible.builtin.template:
     src: otel-config.yaml.j2
     dest: "{{ etc_dir }}/otel-config.yaml"
     owner: root
     group: wheel
-    mode: '0644'
+    mode: '0600'
+  no_log: "{{ victoriametrics_auth_enabled }}"
   notify: Restart OTel Collector
 
 - name: Generate OTel Collector launchd plist
   ansible.builtin.template:
-    src: otelcol.plist.j2
+    src: "{{ role_path }}/../observability_common/templates/launchd_daemon.plist.j2"
     dest: /Library/LaunchDaemons/com.observability.otelcol.plist
     owner: root
     group: wheel
     mode: '0644'
+  vars:
+    launchd_label: com.observability.otelcol
+    launchd_program_arguments: "{{ otel_collector_program_arguments }}"
+    launchd_stdout_log: "{{ log_dir }}/otelcol.out.log"
+    launchd_stderr_log: "{{ log_dir }}/otelcol.err.log"
   notify: Restart OTel Collector
 
 - name: Ensure OTel Collector is started and enabled
   ansible.builtin.service:
     name: com.observability.otelcol
     state: started
-    enabled: yes
+    enabled: true

@@ -42,20 +42,31 @@ For a service that is not loaded, `launchctl print` may report that it could not
    sudo ls -ld /opt/observability /opt/observability/bin /opt/observability/etc /opt/observability/var/log
    ```
 
-   The plist and service files should be readable by root; this project renders them as `root:wheel` with mode `0644` for plists and configuration files.
+   The plist and service files should be readable by root. This project renders them as `root:wheel`, with mode `0644` for plists and non-sensitive files, and `0600` for anything carrying a secret (`otel-config.yaml`, `grafana.ini`, the provisioned datasource, and the VictoriaMetrics password file).
 3. Confirm the executable named in `ProgramArguments` exists and is executable:
 
    ```bash
    sudo ls -l /opt/observability/bin/otelcol-contrib
    sudo ls -l /opt/observability/bin/victoria-metrics-prod
-   sudo ls -l /opt/observability/grafana/bin/grafana-server
+   sudo ls -l /opt/observability/grafana/bin/grafana
    ```
 4. Confirm the configuration path in the plist exists:
 
    ```bash
    sudo ls -l /opt/observability/etc/otel-config.yaml
    sudo ls -l /opt/observability/etc/grafana/grafana.ini
+   sudo ls -l /opt/observability/etc/victoriametrics-auth-password
    ```
+
+   The collector config, `grafana.ini`, the provisioned datasource and the
+   VictoriaMetrics password file all carry secrets and are mode `0600`. A
+   VictoriaMetrics service that starts but answers `401` on every query usually
+   means the password file is missing, unreadable, or does not match what the
+   agents and the Grafana datasource were rendered with.
+
+   Note that `/opt/observability/grafana` and the two binaries under
+   `/opt/observability/bin` are symlinks into versioned install directories, so
+   `ls -l` shows the link target - that is expected.
 5. Inspect service status with `launchctl print system/<label>` and its stdout/stderr logs.
 6. Check for port conflicts on the monitoring Mac:
 

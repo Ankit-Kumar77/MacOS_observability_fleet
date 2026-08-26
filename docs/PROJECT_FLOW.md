@@ -2,7 +2,11 @@
 
 ## Overview
 
-This project automates host-metric observability for Apple Silicon Mac Minis. It has two Ansible roles: `observability_server` configures one monitoring Mac Mini, and `observability_agent` configures every monitored Mac Mini. The same agent role is reused as the fleet grows.
+This project automates host-metric observability for Apple Silicon Mac Minis. It has two applied Ansible roles: `observability_server` configures one monitoring Mac Mini, and `observability_agent` configures every monitored Mac Mini. The same agent role is reused as the fleet grows.
+
+A third role, `observability_common`, is a library rather than something applied to hosts. It holds the parts both roles would otherwise duplicate three times over: the `/opt/observability` directory layout, the download → checksum → versioned-extract → verify install flow, and one launchd plist template shared by all three daemons. Both roles pull these in with `ansible.builtin.include_role` and `tasks_from`.
+
+The shared install flow deliberately stops before creating the stable symlink and before notifying any restart handler. The symlink flip is the moment a service's running version actually changes, so it stays in the calling role beside the handler it triggers.
 
 ## Overall architecture
 
@@ -26,7 +30,13 @@ The collector is deliberately the host-metric agent. It collects data on a Mac, 
 - `monitoring_server`: exactly one central Mac Mini.
 - `monitored_nodes`: every Mac Mini that should send host metrics.
 
-`group_vars/all.yml` provides shared directories, the VictoriaMetrics port, and `monitoring_server_address`. The latter is derived from the first host in `monitoring_server`; this is how agents receive the destination address without a hard-coded server address. `group_vars/monitoring_server.yml` contains server-specific version and Grafana settings. `group_vars/monitored_nodes.yml` contains the collector version and Apple Silicon archive URL.
+Variables are split by ownership:
+
+- `roles/<role>/defaults/main.yml` holds versions, checksums, install paths, ports and tuning. Each role is self-contained and can be run against a different inventory.
+- `group_vars/all.yml` holds only the **cross-role contract** - `victoriametrics_port`, `monitoring_server_address`, and the VictoriaMetrics authentication settings. These must agree between the monitoring Mac and every agent, so they are defined exactly once.
+- `group_vars/<group>.yml` holds vault secret references and per-environment overrides.
+
+`monitoring_server_address` is derived from the first host in `monitoring_server`; this is how agents receive the destination address without a hard-coded server address. The agent role asserts that this group contains exactly one host with `ansible_host` set, so a misconfigured inventory fails with a clear message instead of an index error.
 
 ```mermaid
 flowchart TD
@@ -35,6 +45,11 @@ flowchart TD
     S -->|monitored_nodes| AR[observability_agent]
     SR --> ST[Server templates and launchd plists]
     AR --> AT[Collector config and launchd plist]
+    SR -.include_role.-> C[observability_common]
+    AR -.include_role.-> C
+    C --> CD[base_directories]
+    C --> CI[install_versioned_archive]
+    C --> CP[launchd_daemon.plist.j2]
 ```
 
 `site.yml` has one play for each inventory group. Tags allow the server play (`--tags server`) and agent play (`--tags agent`) to be run independently.
@@ -44,19 +59,21 @@ flowchart TD
 The `observability_server` role imports tasks in this order:
 
 1. `prerequisites.yml` creates `/opt/observability` directories for binaries, configuration, data, plugins, and logs.
-2. `victoriametrics.yml` downloads and extracts `victoria-metrics-prod` to `/opt/observability/bin`, renders its plist, and requests service start.
-3. `grafana.yml` extracts Grafana under `/opt/observability/grafana`, renders `grafana.ini`, provisions the VictoriaMetrics datasource and dashboard, renders its plist, and requests service start.
-4. `verify.yml` checks VictoriaMetrics health, Grafana health, and the Grafana datasource API.
+2. `victoriametrics.yml` writes the `0600` basic-auth password file, downloads and checksum-verifies the archive, extracts it into a versioned directory, repoints the `victoria-metrics-prod` symlink, renders its plist, and requests service start.
+3. `grafana.yml` extracts Grafana into a versioned directory, repoints the `/opt/observability/grafana` symlink, renders `grafana.ini`, provisions the VictoriaMetrics datasource and dashboard, renders its plist, and requests service start.
+4. `flush_handlers` applies any pending restarts **before** verification, so the checks below see the configuration this run just produced rather than the previous one.
+5. `verify.yml` checks VictoriaMetrics health, that its query API accepts the configured credentials and rejects unauthenticated access, Grafana health, the Grafana datasource API, and that the fleet dashboard was provisioned.
 
-The VictoriaMetrics plist points to `/opt/observability/bin/victoria-metrics-prod`, stores data in `/opt/observability/var/victoriametrics`, logs under `/opt/observability/var/log`, and listens on the shared port variable (default `8428`). Grafana's plist uses `/opt/observability/grafana/bin/grafana-server`; its configuration, data, plugin, and log paths agree with the rendered `grafana.ini`.
+The VictoriaMetrics plist points to `/opt/observability/bin/victoria-metrics-prod`, stores data in `/opt/observability/var/victoriametrics`, logs under `/opt/observability/var/log`, and listens on the shared port variable (default `8428`). Grafana's plist runs `/opt/observability/grafana/bin/grafana server` (Grafana 11+ removed the separate `grafana-server` binary); its configuration, data, plugin, and log paths agree with the rendered `grafana.ini`.
 
 ## Monitored Mac flow
 
 The `observability_agent` role imports tasks in this order:
 
-1. `prerequisites.yml` creates the shared directory structure.
-2. `opentelemetry.yml` downloads the Darwin ARM64 `otelcol-contrib` archive, extracts `/opt/observability/bin/otelcol-contrib`, asserts the binary exists, renders the collector configuration and plist, and requests service start.
-3. `verify.yml` checks reachability to the monitoring server on the VictoriaMetrics port and runs `otelcol-contrib validate` against the rendered configuration.
+1. `prerequisites.yml` asserts the `monitoring_server` group is usable, then creates the shared directory structure.
+2. `opentelemetry.yml` downloads and checksum-verifies the Darwin ARM64 `otelcol-contrib` archive, extracts it into a versioned directory, asserts the binary exists, repoints the `/opt/observability/bin/otelcol-contrib` symlink, renders the `0600` collector configuration and the plist, and requests service start.
+3. `flush_handlers` applies the pending restart before verification.
+4. `verify.yml` checks reachability to the monitoring server, runs `otelcol-contrib validate` against the rendered configuration, and then waits for host metrics to actually appear in VictoriaMetrics before reporting the hosts currently reporting.
 
 The collector plist starts the same binary and configuration that the role renders:
 
@@ -79,6 +96,9 @@ hostmetrics -> resourcedetection -> batch -> otlphttp -> VictoriaMetrics
 | `resourcedetection` | Detects system resource attributes, including the OS hostname. | Associates metrics with the Mac that emitted them. |
 | `batch` | Groups telemetry before export. | Reduces individual export operations. |
 | `otlphttp` | Sends metric payloads over OTLP/HTTP. | Uses VictoriaMetrics' OpenTelemetry ingestion endpoint. |
+| `basicauth` | Attaches basic-auth credentials to the export. | VictoriaMetrics rejects unauthenticated writes when `victoriametrics_auth_enabled` is true. |
+
+VictoriaMetrics runs with `-opentelemetry.usePrometheusNaming`. Without that flag it stores OTLP metric names verbatim, dots included (`system.memory.usage`, label `host.name`), and every dashboard query returns nothing.
 
 The exporter endpoint is rendered from variables as:
 

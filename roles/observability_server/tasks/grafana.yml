@@ -1,36 +1,52 @@
 ---
-- name: Download Grafana archive
-  ansible.builtin.get_url:
-    url: "{{ grafana_download_url }}"
-    dest: "/tmp/grafana.tar.gz"
-    mode: '0644'
+- name: Install the Grafana release
+  ansible.builtin.include_role:
+    name: observability_common
+    tasks_from: install_versioned_archive
+  vars:
+    observability_archive_component: Grafana
+    observability_archive_url: "{{ grafana_download_url }}"
+    observability_archive_checksum: "{{ grafana_checksum }}"
+    observability_archive_tmp_path: "/tmp/grafana-{{ grafana_version }}.tar.gz"
+    observability_archive_install_dir: "{{ grafana_install_dir }}"
+    observability_archive_binary_path: "{{ grafana_install_dir }}/bin/grafana"
+    # The Grafana tarball nests everything under a grafana-<version>/ prefix.
+    observability_archive_extra_opts:
+      - "--strip-components=1"
 
-- name: Extract Grafana
-  ansible.builtin.unarchive:
-    src: "/tmp/grafana.tar.gz"
-    dest: "{{ base_dir }}/grafana"
-    remote_src: yes
-    extra_opts:
-      - --strip-components=1
-    creates: "{{ base_dir }}/grafana/bin/grafana-server"
+# The symlink flip -- not the extraction -- is the moment the running version
+# changes, which is why the restart is notified from here.
+- name: Point the active Grafana installation at this version
+  ansible.builtin.file:
+    src: "{{ grafana_install_dir }}"
+    dest: "{{ grafana_home }}"
+    state: link
+    owner: root
+    group: wheel
+    follow: false
+    force: true
   notify: Restart Grafana
 
+# 0600: contains the Grafana admin password in plaintext.
 - name: Generate Grafana configuration
   ansible.builtin.template:
     src: grafana.ini.j2
     dest: "{{ etc_dir }}/grafana/grafana.ini"
     owner: root
     group: wheel
-    mode: '0644'
+    mode: '0600'
+  no_log: true
   notify: Restart Grafana
 
+# 0600: carries the VictoriaMetrics basic-auth password when auth is enabled.
 - name: Provision VictoriaMetrics datasource
   ansible.builtin.template:
     src: datasource.yml.j2
     dest: "{{ etc_dir }}/grafana/provisioning/datasources/victoriametrics.yml"
     owner: root
     group: wheel
-    mode: '0644'
+    mode: '0600'
+  no_log: "{{ victoriametrics_auth_enabled }}"
   notify: Restart Grafana
 
 - name: Provision Grafana dashboard provider
@@ -53,15 +69,21 @@
 
 - name: Generate Grafana launchd plist
   ansible.builtin.template:
-    src: grafana.plist.j2
+    src: "{{ role_path }}/../observability_common/templates/launchd_daemon.plist.j2"
     dest: /Library/LaunchDaemons/com.observability.grafana.plist
     owner: root
     group: wheel
     mode: '0644'
+  vars:
+    launchd_label: com.observability.grafana
+    launchd_working_directory: "{{ grafana_home }}"
+    launchd_program_arguments: "{{ grafana_program_arguments }}"
+    launchd_stdout_log: "{{ log_dir }}/grafana.out.log"
+    launchd_stderr_log: "{{ log_dir }}/grafana.err.log"
   notify: Restart Grafana
 
 - name: Ensure Grafana is started and enabled
   ansible.builtin.service:
     name: com.observability.grafana
     state: started
-    enabled: yes
+    enabled: true

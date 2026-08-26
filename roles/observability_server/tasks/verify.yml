@@ -1,13 +1,34 @@
 ---
+# /health is deliberately exempt from VictoriaMetrics basic auth, so this stays
+# an unauthenticated probe even when authentication is enabled.
 - name: Wait for VictoriaMetrics to become ready
   ansible.builtin.uri:
     url: "http://localhost:{{ victoriametrics_port }}/health"
     method: GET
     status_code: 200
-  register: _vm_health
-  until: _vm_health.status == 200
-  retries: 5
-  delay: 5
+  register: observability_server_vm_health
+  until: observability_server_vm_health.status is defined and observability_server_vm_health.status == 200
+  retries: "{{ victoriametrics_ready_retries }}"
+  delay: "{{ service_ready_delay }}"
+  tags: ['verify']
+
+- name: Verify the VictoriaMetrics query API accepts the configured credentials
+  ansible.builtin.uri:
+    url: "http://localhost:{{ victoriametrics_port }}/api/v1/labels"
+    url_username: "{{ victoriametrics_auth_username }}"
+    url_password: "{{ victoriametrics_auth_password }}"
+    force_basic_auth: true
+    method: GET
+    status_code: 200
+  when: victoriametrics_auth_enabled
+  tags: ['verify']
+
+- name: Verify the VictoriaMetrics query API rejects unauthenticated access
+  ansible.builtin.uri:
+    url: "http://localhost:{{ victoriametrics_port }}/api/v1/labels"
+    method: GET
+    status_code: 401
+  when: victoriametrics_auth_enabled
   tags: ['verify']
 
 - name: Wait for Grafana to become ready
@@ -15,10 +36,10 @@
     url: "http://localhost:{{ grafana_port }}/api/health"
     method: GET
     status_code: 200
-  register: _grafana_health
-  until: _grafana_health.status == 200
-  retries: 5
-  delay: 5
+  register: observability_server_grafana_health
+  until: observability_server_grafana_health.status is defined and observability_server_grafana_health.status == 200
+  retries: "{{ grafana_ready_retries }}"
+  delay: "{{ service_ready_delay }}"
   tags: ['verify']
 
 - name: Verify Grafana datasource configuration exists
@@ -26,16 +47,34 @@
     url: "http://localhost:{{ grafana_port }}/api/datasources"
     url_username: admin
     url_password: "{{ grafana_admin_password }}"
-    force_basic_auth: yes
+    force_basic_auth: true
     method: GET
     status_code: 200
-  register: _grafana_datasources
-  until: "'VictoriaMetrics' in _grafana_datasources.json | map(attribute='name') | list"
-  retries: 5
-  delay: 5
+  register: observability_server_datasources
+  until: observability_server_datasources.json is defined and 'VictoriaMetrics' in (observability_server_datasources.json | map(attribute='name') | list)
+  retries: "{{ grafana_ready_retries }}"
+  delay: "{{ service_ready_delay }}"
+  no_log: true
+  tags: ['verify']
+
+- name: Verify the fleet dashboard was provisioned
+  ansible.builtin.uri:
+    url: "http://localhost:{{ grafana_port }}/api/dashboards/uid/mac-mini-fleet"
+    url_username: admin
+    url_password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    method: GET
+    status_code: 200
+  register: observability_server_dashboard
+  until: observability_server_dashboard.status is defined and observability_server_dashboard.status == 200
+  retries: "{{ grafana_ready_retries }}"
+  delay: "{{ service_ready_delay }}"
+  no_log: true
   tags: ['verify']
 
 - name: Report server verification success
   ansible.builtin.debug:
-    msg: "Monitoring server components (VictoriaMetrics and Grafana) are running and healthy. Datasource verified."
+    msg: >-
+      VictoriaMetrics and Grafana are healthy, the VictoriaMetrics datasource is
+      registered, and the Mac Mini fleet dashboard is provisioned.
   tags: ['verify']

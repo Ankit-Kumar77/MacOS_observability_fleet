@@ -1,14 +1,18 @@
 ---
-- name: Ensure base directories exist
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: directory
-    owner: root
-    group: wheel
-    mode: '0755'
-  loop:
-    - "{{ base_dir }}"
-    - "{{ bin_dir }}"
-    - "{{ etc_dir }}"
-    - "{{ var_dir }}"
-    - "{{ log_dir }}"
+- name: Assert the monitoring server group resolves to one addressable host
+  ansible.builtin.assert:
+    that:
+      - groups.get('monitoring_server') | default([]) | length == 1
+      - hostvars[groups['monitoring_server'][0]]['ansible_host'] is defined
+    fail_msg: >-
+      Monitored nodes derive their export endpoint from the monitoring_server
+      group, which must contain exactly one host with ansible_host set.
+      Found {{ groups.get('monitoring_server') | default([]) | length }} host(s).
+  run_once: true
+  delegate_to: localhost
+  become: false
+
+- name: Create the observability directory layout
+  ansible.builtin.include_role:
+    name: observability_common
+    tasks_from: base_directories

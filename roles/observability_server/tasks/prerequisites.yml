@@ -1,20 +1,16 @@
 ---
-- name: Ensure base directories exist
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: directory
-    owner: root
-    group: wheel
-    mode: '0755'
-  loop:
-    - "{{ base_dir }}"
-    - "{{ bin_dir }}"
-    - "{{ etc_dir }}"
-    - "{{ var_dir }}"
-    - "{{ log_dir }}"
-    - "{{ var_dir }}/victoriametrics"
-    - "{{ var_dir }}/grafana"
-    - "{{ var_dir }}/grafana/plugins"
-    - "{{ base_dir }}/grafana"
-    - "{{ etc_dir }}/grafana/provisioning/datasources"
-    - "{{ etc_dir }}/grafana/provisioning/dashboards"
+# NOTE: {{ grafana_home }} is deliberately absent from the directory list. It is
+# created as a symlink to the versioned Grafana install directory in grafana.yml,
+# and ansible.builtin.file will refuse to replace a real directory with a symlink.
+# {{ var_dir }}/grafana below is Grafana's data directory, which is a real one.
+- name: Create the observability directory layout
+  ansible.builtin.include_role:
+    name: observability_common
+    tasks_from: base_directories
+  vars:
+    observability_extra_directories:
+      - "{{ var_dir }}/victoriametrics"
+      - "{{ var_dir }}/grafana"
+      - "{{ var_dir }}/grafana/plugins"
+      - "{{ etc_dir }}/grafana/provisioning/datasources"
+      - "{{ etc_dir }}/grafana/provisioning/dashboards"

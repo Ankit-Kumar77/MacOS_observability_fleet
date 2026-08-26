@@ -44,9 +44,11 @@ The monitoring Mac is selected through the `monitoring_server` inventory group. 
 | --- | --- |
 | `site.yml` | Defines the server play for `monitoring_server` and the agent play for `monitored_nodes`. |
 | `inventories/production/hosts.yml` | Defines target Macs, their addresses, users, and group membership. |
-| `inventories/production/group_vars/` | Holds shared, server-specific, and worker-specific variables. |
+| `inventories/production/group_vars/` | Holds the cross-role contract (`victoriametrics_port`, `monitoring_server_address`, auth settings), vault secret references, and per-environment overrides. |
+| `roles/<role>/defaults/main.yml` | Holds versions, checksums, install paths, ports and tuning, so each role is self-contained. |
 | `roles/observability_server/` | Installs and configures VictoriaMetrics and Grafana. |
 | `roles/observability_agent/` | Installs and configures OpenTelemetry Collector Contrib. |
+| `roles/observability_common/` | Shared building blocks used by both roles: the directory layout, the versioned-archive install flow, and the single launchd plist template. Never applied on its own. |
 | `tasks/` | Ordered deployment and verification work. |
 | `handlers/` | Restart requests triggered when relevant rendered files change. |
 | `templates/` | Jinja2 templates for application configuration, provisioning, dashboards, and launchd plists. |
@@ -58,13 +60,14 @@ Ansible reads inventory and group variables for a target host, runs the matching
 When `observability_server` runs, it performs the following sequence:
 
 1. Creates `/opt/observability` directories for binaries, configuration, data, plugins, and logs.
-2. Downloads and extracts `victoria-metrics-prod` to `/opt/observability/bin`.
-3. Renders `com.observability.victoriametrics.plist` with the VictoriaMetrics binary, data path, port, and log paths.
-4. Downloads and extracts Grafana under `/opt/observability/grafana`.
-5. Renders `grafana.ini` and the Grafana launchd plist.
-6. Provisions the VictoriaMetrics datasource, dashboard provider, and default Mac Mini dashboard.
-7. Requests service start/enable through the current `ansible.builtin.service` tasks.
-8. Verifies VictoriaMetrics and Grafana health endpoints and checks the Grafana datasource API.
+2. Writes the `0600` VictoriaMetrics basic-auth password file.
+3. Downloads, checksum-verifies and extracts `victoria-metrics-prod` into a versioned directory, then repoints the stable `/opt/observability/bin/victoria-metrics-prod` symlink at it.
+4. Renders `com.observability.victoriametrics.plist` with the binary, data path, port, retention, the Prometheus-naming flag, and the auth credentials.
+5. Downloads, checksum-verifies and extracts Grafana into a versioned directory, then repoints the `/opt/observability/grafana` symlink.
+6. Renders `grafana.ini` and the Grafana launchd plist.
+7. Provisions the VictoriaMetrics datasource, dashboard provider, and default Mac Mini dashboard.
+8. Requests service start/enable, then flushes handlers so verification sees the current configuration.
+9. Verifies both health endpoints, that VictoriaMetrics accepts the configured credentials and rejects unauthenticated queries, the Grafana datasource API, and that the fleet dashboard was provisioned.
 
 VictoriaMetrics listens on the shared `victoriametrics_port` variable, currently `8428`. Grafana listens on the server-only `grafana_port`, currently `3000`.
 
@@ -72,13 +75,13 @@ VictoriaMetrics listens on the shared `victoriametrics_port` variable, currently
 
 When `observability_agent` runs, it:
 
-1. Creates the shared `/opt/observability` directory structure.
-2. Downloads the configured Darwin ARM64 `otelcol-contrib` archive.
-3. Extracts `/opt/observability/bin/otelcol-contrib` and asserts that the binary exists.
-4. Renders `/opt/observability/etc/otel-config.yaml`.
+1. Asserts the `monitoring_server` group holds exactly one host with an address, then creates the shared `/opt/observability` directory structure.
+2. Downloads and checksum-verifies the configured Darwin ARM64 `otelcol-contrib` archive.
+3. Extracts it into a versioned directory, asserts the binary exists, and repoints the stable `/opt/observability/bin/otelcol-contrib` symlink.
+4. Renders `/opt/observability/etc/otel-config.yaml` as `0600` (it carries the VictoriaMetrics password).
 5. Renders `com.observability.otelcol.plist` with the binary, configuration, and log paths.
-6. Requests collector start/enable through the current `ansible.builtin.service` task.
-7. Checks reachability to the monitoring Mac on port `8428` and validates the rendered collector configuration with `otelcol-contrib validate`.
+6. Requests collector start/enable, then flushes handlers.
+7. Checks reachability to the monitoring Mac on port `8428`, validates the rendered configuration with `otelcol-contrib validate`, and waits for this Mac's metrics to actually appear in VictoriaMetrics.
 
 ## 7. OpenTelemetry in simple terms
 
@@ -164,7 +167,7 @@ No new role is needed for more Macs. Inventory membership determines where `obse
 - `com.observability.grafana`
 - `com.observability.otelcol`
 
-The corresponding templates are in `roles/observability_server/templates/` and `roles/observability_agent/templates/`. The current roles use `ansible.builtin.service` for service requests. Actual launchd behavior has not been validated on a real Mac Mini; use [LAUNCHD_TROUBLESHOOTING.md](../LAUNCHD_TROUBLESHOOTING.md) for diagnostic commands and the future refactor guidance.
+All three are rendered from a single shared template, `roles/observability_common/templates/launchd_daemon.plist.j2`. Each calling role supplies the label, the `ProgramArguments` list (kept in that role's `defaults/main.yml`) and the log paths, so the three plists cannot drift apart. The current roles use `ansible.builtin.service` for service requests. Actual launchd behavior has not been validated on a real Mac Mini; use [LAUNCHD_TROUBLESHOOTING.md](../LAUNCHD_TROUBLESHOOTING.md) for diagnostic commands and the future refactor guidance.
 
 ## 14. Variables and dynamic configuration
 
@@ -203,6 +206,9 @@ For example, `monitoring_server_address` is derived from the first host in the `
 | Why `hostmetrics`? | It collects the required local system metrics on each worker Mac. |
 | Why not Node Exporter? | It is not part of this design; the configured collector `hostmetrics` receiver provides the required host metrics. |
 | Why not Prometheus? | It is not part of this design; VictoriaMetrics receives OTLP/HTTP metrics directly. |
+| Why is the collector version pinned so specifically? | On macOS the `cpu` and `disk` scrapers were unimplemented until well after 0.98.0. Below 0.159.0 the CPU and disk panels cannot populate at all. |
+| Why does VictoriaMetrics need a naming flag? | Without `-opentelemetry.usePrometheusNaming` it stores OTLP names verbatim (`system.memory.usage`, label `host.name`), which matches no dashboard query. |
+| Why does VictoriaMetrics need a password? | It has no authentication of its own. Anyone able to reach port 8428 could otherwise read, write or delete fleet metrics. |
 | Why VictoriaMetrics? | It is the configured metric store and supports the required OTLP/HTTP ingestion endpoint. |
 | Why Grafana? | It provides the configured datasource and dashboards for metric visualization. |
 | Why one monitoring Mac? | The inventory has one `monitoring_server` target that centralizes storage and visualization. |
@@ -235,7 +241,8 @@ The repository is a template for a real environment. It avoids embedding environ
 - Exactly one Mac assigned to `monitoring_server`.
 - All collector Macs assigned to `monitored_nodes`.
 - A reachable monitoring-Mac address; agents derive this from the selected monitoring-server inventory host.
-- The Grafana password through `vault_grafana_admin_password` or the approved secret mechanism.
+- The Grafana password through `vault_grafana_admin_password`.
+- The VictoriaMetrics basic-auth password through `vault_victoriametrics_password`. The collector on every Mac, the Grafana datasource and VictoriaMetrics itself are rendered from it, so all three must come from the same vault.
 - Any legitimate environment changes to base paths, ports, or versions in group variables. The default paths and ports should only be changed when the environment requires it.
 
 Template inventory:

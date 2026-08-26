@@ -1,68 +1,124 @@
+{#- Managed by Ansible. Grafana legend syntax {{host_name}} collides with
+    Jinja delimiters, so it is escaped as {{ '{{' }}host_name{{ '}}' }}. -#}
+{% set ds = {"type": "prometheus", "uid": "victoriametrics"} %}
 {
+  "uid": "mac-mini-fleet",
   "title": "Mac Mini Fleet Overview",
   "tags": ["macos", "otel", "hostmetrics"],
   "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
   "panels": [
     {
+      "id": 1,
       "type": "stat",
       "title": "Active Hosts",
+      "description": "Distinct Macs reporting host metrics.",
+      "datasource": {{ ds | tojson }},
       "gridPos": {"x": 0, "y": 0, "w": 4, "h": 4},
+      "fieldConfig": {"defaults": {"unit": "none", "color": {"mode": "thresholds"}}, "overrides": []},
       "targets": [
         {
-          "expr": "count(system_cpu_time_seconds_total{state=\"idle\"}) by (host_name)",
-          "legendFormat": "{{ '{{' }}host_name{{ '}}' }}"
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "count(count by (host_name) (system_memory_usage_bytes))",
+          "legendFormat": "hosts",
+          "instant": true
         }
       ]
     },
     {
+      "id": 2,
       "type": "timeseries",
       "title": "CPU Usage (%)",
+      "description": "Busy CPU time as a share of total CPU time. macOS reports no per-core `cpu` label, so this normalises against the sum of all states rather than averaging.",
+      "datasource": {{ ds | tojson }},
       "gridPos": {"x": 4, "y": 0, "w": 10, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100}, "overrides": []},
       "targets": [
         {
-          "expr": "100 - (avg by (host_name) (rate(system_cpu_time_seconds_total{state=\"idle\"}[5m])) * 100)",
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "100 * (1 - sum by (host_name) (rate(system_cpu_time_seconds_total{state=\"idle\"}[5m])) / sum by (host_name) (rate(system_cpu_time_seconds_total[5m])))",
           "legendFormat": "{{ '{{' }}host_name{{ '}}' }}"
         }
       ]
     },
     {
+      "id": 3,
       "type": "timeseries",
       "title": "Memory Usage (%)",
+      "description": "macOS memory states are free / inactive / used; inactive is reclaimable and is not counted as used.",
+      "datasource": {{ ds | tojson }},
       "gridPos": {"x": 14, "y": 0, "w": 10, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100}, "overrides": []},
       "targets": [
         {
-          "expr": "(system_memory_usage_bytes{state=\"used\"} / sum by (host_name) (system_memory_usage_bytes)) * 100",
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "sum by (host_name) (system_memory_usage_bytes{state=\"used\"}) / sum by (host_name) (system_memory_usage_bytes) * 100",
           "legendFormat": "{{ '{{' }}host_name{{ '}}' }}"
         }
       ]
     },
     {
+      "id": 4,
       "type": "timeseries",
       "title": "Disk Usage (%)",
+      "description": "Root APFS volume. Sibling volumes in the same container report identical capacity, so only \"/\" is charted.",
+      "datasource": {{ ds | tojson }},
       "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100}, "overrides": []},
       "targets": [
         {
-          "expr": "(system_filesystem_usage_bytes{state=\"used\", mountpoint=\"/\"} / sum by (host_name) (system_filesystem_usage_bytes{mountpoint=\"/\"})) * 100",
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "sum by (host_name) (system_filesystem_usage_bytes{state=\"used\", mountpoint=\"/\"}) / sum by (host_name) (system_filesystem_usage_bytes{mountpoint=\"/\"}) * 100",
           "legendFormat": "{{ '{{' }}host_name{{ '}}' }}"
         }
       ]
     },
     {
+      "id": 5,
       "type": "timeseries",
       "title": "Network Traffic (bytes/sec)",
+      "description": "Summed across interfaces; without the sum each host contributes one series per interface.",
+      "datasource": {{ ds | tojson }},
       "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []},
       "targets": [
         {
-          "expr": "rate(system_network_io_bytes_total{direction=\"receive\"}[5m])",
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "sum by (host_name) (rate(system_network_io_bytes_total{direction=\"receive\"}[5m]))",
           "legendFormat": "{{ '{{' }}host_name{{ '}}' }} (Receive)"
         },
         {
-          "expr": "rate(system_network_io_bytes_total{direction=\"transmit\"}[5m])",
+          "refId": "B",
+          "datasource": {{ ds | tojson }},
+          "expr": "sum by (host_name) (rate(system_network_io_bytes_total{direction=\"transmit\"}[5m]))",
           "legendFormat": "{{ '{{' }}host_name{{ '}}' }} (Transmit)"
         }
       ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Load Average (1m)",
+      "description": "Available on macOS from the hostmetrics load scraper.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 0, "y": 16, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "none", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "system_cpu_load_average_1m",
+          "legendFormat": "{{ '{{' }}host_name{{ '}}' }}"
+        }
+      ]
     }
-  ],
-  "schemaVersion": 30,
-  "version": 3
+  ]
 }

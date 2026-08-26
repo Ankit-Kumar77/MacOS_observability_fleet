@@ -1,0 +1,24 @@
+---
+# Creates the /opt/observability layout shared by both roles.
+#
+# Callers may pass observability_extra_directories with any role-specific paths
+# to create alongside the base layout, for example:
+#
+#   - name: Create the observability directory layout
+#     ansible.builtin.include_role:
+#       name: observability_common
+#       tasks_from: base_directories
+#     vars:
+#       observability_extra_directories:
+#         - "{{ var_dir }}/victoriametrics"
+#
+# Never add a path here that is meant to become a symlink: ansible.builtin.file
+# refuses to replace a real directory with one.
+- name: Ensure the observability directory layout exists
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: wheel
+    mode: '0755'
+  loop: "{{ [base_dir, bin_dir, etc_dir, var_dir, log_dir] + (observability_extra_directories | default([])) }}"

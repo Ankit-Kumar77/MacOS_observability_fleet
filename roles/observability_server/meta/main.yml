@@ -1,0 +1,17 @@
+---
+galaxy_info:
+  role_name: observability_server
+  author: MacOS observability fleet
+  description: Installs VictoriaMetrics and Grafana on an Apple Silicon monitoring Mac.
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: MacOSX
+      versions:
+        - all
+  galaxy_tags:
+    - monitoring
+    - victoriametrics
+    - grafana
+    - macos
+dependencies: []

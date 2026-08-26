@@ -1,0 +1,15 @@
+---
+profile: production
+
+exclude_paths:
+  - .github/
+
+skip_list:
+  # Inventory placeholders and long download URLs are intentional.
+  - yaml[line-length]
+  # This project deliberately shares a documented vocabulary between the two
+  # roles (base_dir, bin_dir, victoriametrics_port, monitoring_server_address).
+  # Enforcing per-role prefixes would create two names for the same concept -
+  # observability_agent_base_dir vs observability_server_base_dir - and break
+  # the cross-role contract that group_vars/all.yml exists to express.
+  - var-naming[no-role-prefix]

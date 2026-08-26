@@ -1,0 +1,19 @@
+---
+# observability_common is a library role. It is never applied to a host
+# directly; both observability_server and observability_agent pull individual
+# task files out of it with:
+#
+#   - name: ...
+#     ansible.builtin.include_role:
+#       name: observability_common
+#       tasks_from: install_versioned_archive   # or base_directories
+#
+# This entry point exists only so the role is well-formed, and intentionally
+# does nothing. See tasks/base_directories.yml and
+# tasks/install_versioned_archive.yml for the shared work.
+- name: Confirm observability_common is used as a library role
+  ansible.builtin.debug:
+    msg: >-
+      observability_common provides shared task files and the launchd plist
+      template. Include it with tasks_from rather than applying it directly.
+  when: false

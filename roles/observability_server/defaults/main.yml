@@ -7,10 +7,10 @@ var_dir: "{{ base_dir }}/var"
 log_dir: "{{ var_dir }}/log"
 
 # VictoriaMetrics.
-victoriametrics_version: "1.150.0"
+victoriametrics_version: "1.101.0"
 victoriametrics_download_url: "https://github.com/VictoriaMetrics/VictoriaMetrics/releases/download/v{{ victoriametrics_version }}/victoria-metrics-darwin-arm64-v{{ victoriametrics_version }}.tar.gz"
 # Upstream-published SHA256 (…_checksums.txt). Update on version bump.
-victoriametrics_checksum: "sha256:ed6e2c06e88fed5865fbe838d34f68613208f79032308cd12ec7d7b13785d978"
+victoriametrics_checksum: "sha256:91a443162e29f4a96dd1a564b81a96b0509fc7a46d522ab4f4d94a5fd867a438"
 victoriametrics_install_dir: "{{ bin_dir }}/victoria-metrics-{{ victoriametrics_version }}"
 # VictoriaMetrics deletes data older than this. Its own default is 1 month,
 # which is easy to be surprised by; set it explicitly.

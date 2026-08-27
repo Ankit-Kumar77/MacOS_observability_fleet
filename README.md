@@ -112,7 +112,7 @@ The `observability_agent` role is reused unchanged for any number of monitored M
 | Component | Version | Why this version matters |
 | --- | --- | --- |
 | OpenTelemetry Collector Contrib | `0.159.0` | **Minimum usable version on macOS.** In `0.98.0` the `hostmetrics` `cpu` and `disk` scrapers return `not implemented yet` on darwin and emit nothing, leaving the CPU and disk panels permanently empty. Do not downgrade without re-testing on a Mac. |
-| VictoriaMetrics | `1.150.0` | Runs with `-opentelemetry.usePrometheusNaming`. Without that flag it stores OTLP names verbatim (`system.memory.usage`, label `host.name`) and every dashboard query returns nothing. |
+| VictoriaMetrics | `1.101.0` | Runs with `-opentelemetry.usePrometheusNaming`. Without that flag it stores OTLP names verbatim (`system.memory.usage`, label `host.name`) and every dashboard query returns nothing. Confirmed present in `1.101.0`'s flag list; see "Validation limits" below for what has and hasn't been run end-to-end at this version. |
 | Grafana | `13.2.0` | Grafana 11+ removed the separate `grafana-server` binary; the launchd plist uses `grafana server` instead. |
 
 Versions, checksums and tuning are role defaults under
@@ -161,6 +161,11 @@ binaries locally: collector `0.159.0` scraping `hostmetrics`, exporting OTLP/HTT
 with basic auth into VictoriaMetrics `1.150.0`, and Grafana `13.2.0` rendering
 this project's provisioned datasource and dashboard. All six dashboard panels
 return data through Grafana's datasource proxy.
+
+The pinned VictoriaMetrics default has since moved to `1.101.0` (to match an
+already-downloaded local archive) and has **not** been through this same
+end-to-end run — only confirmed to expose `-opentelemetry.usePrometheusNaming`
+in its flag list. Re-verify the dashboard panels after deploying with it.
 
 What that does **not** cover, and still requires physical Mac Minis:
 

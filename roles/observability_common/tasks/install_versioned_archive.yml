@@ -45,15 +45,29 @@
     group: wheel
     mode: '0755'
 
-- name: Extract the release archive for {{ observability_archive_component }}
-  ansible.builtin.unarchive:
-    src: "{{ observability_archive_tmp_path }}"
-    dest: "{{ observability_archive_install_dir }}"
-    remote_src: true
+# ansible.builtin.unarchive refuses to drive macOS's built-in tar: it detects
+# /usr/bin/tar as BSD tar (libarchive) and hard-requires GNU tar for its
+# idempotency bookkeeping, so it falls through to unzip and fails on every
+# .tar.gz here. Shelling out to tar directly sidesteps that module-level
+# check entirely -- BSD tar extracts standard .tar.gz archives (including
+# --strip-components) just fine, and idempotency is already handled by
+# `creates:` below.
+- name: Extract the release archive for {{ observability_archive_component }} # noqa: command-instead-of-module
+  ansible.builtin.command:
+    argv: "{{ ['tar', '-xzf', observability_archive_tmp_path, '-C', observability_archive_install_dir] + (observability_archive_extra_opts | default([])) }}"
+    creates: "{{ observability_archive_binary_path }}"
+  register: observability_archive_extract
+
+# tar run as root restores whatever owner/group is baked into the archive,
+# which is not guaranteed to be root:wheel, so normalize it explicitly --
+# unarchive did this itself via its owner/group parameters.
+- name: Normalize ownership of the extracted release for {{ observability_archive_component }}
+  ansible.builtin.file:
+    path: "{{ observability_archive_install_dir }}"
     owner: root
     group: wheel
-    extra_opts: "{{ observability_archive_extra_opts | default([]) }}"
-    creates: "{{ observability_archive_binary_path }}"
+    recurse: true
+  when: observability_archive_extract is changed
 
 - name: Stat the installed binary for {{ observability_archive_component }}
   ansible.builtin.stat:

@@ -32,6 +32,13 @@ ansible-playbook -i inventories/production/hosts.yml site.yml --tags verify --as
 
 Add `--ask-vault-pass` only if you have re-enabled auth with vaulted credentials (see "Secrets" below).
 
+If a target Mac can only reach GitHub through a proxy, the release-archive downloads (`observability_common`'s `install_versioned_archive.yml`, used for VictoriaMetrics, Grafana and otelcol-contrib) read `proxy_env` (empty by default in `inventories/production/group_vars/all.yml`) and pass it as the module's environment, e.g.:
+
+```bash
+ansible-playbook -i inventories/production/hosts.yml site.yml --tags server --ask-become-pass \
+  -e '{"proxy_env":{"http_proxy":"http://127.0.0.1:9000","https_proxy":"http://127.0.0.1:9000"}}'
+```
+
 ### Testing changes without Mac Minis
 
 Most of this project can be verified locally on any Apple Silicon Mac, and it is worth doing — every dashboard defect found so far was invisible to static checks. Download the pinned binaries, run VictoriaMetrics and the collector against each other on spare ports, then query VictoriaMetrics for the metric names and run the dashboard's PromQL directly. Grafana can be started against the rendered `grafana.ini` and provisioning directory to confirm the datasource and dashboard load, and its `/api/datasources/proxy/uid/victoriametrics/api/v1/query` endpoint runs panel queries through the real datasource.

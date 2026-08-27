@@ -56,34 +56,28 @@ Start with one of each. Do not scale out until this flow succeeds on physical Ma
 
 1. **Prepare the monitoring Mac.** Confirm SSH and sudo access, and ensure ports `8428` and `3000` are available.
 2. **Configure inventory.** Add the monitoring Mac and one agent as shown above.
-3. **Provide the two required secrets.** Store both with Ansible Vault:
+3. **Secrets (optional).** No vault is required by default: `victoriametrics_auth_enabled: false` in `inventories/production/group_vars/all.yml`, and `grafana_admin_password` in `inventories/production/group_vars/monitoring_server.yml` is a plain, checked-in default (`admin`). This is meant for local/testing use — anyone who can reach port `8428` can read, write, or delete fleet metrics unauthenticated, and Grafana logs in with the default credentials.
+
+   For anything beyond that, set real credentials, plain or vaulted:
 
    ```bash
    ansible-vault encrypt_string 'replace-with-a-strong-password' --name 'vault_grafana_admin_password'
    ansible-vault encrypt_string 'replace-with-a-strong-password' --name 'vault_victoriametrics_password'
    ```
 
-   Make the resulting vaulted variables available to the playbook.
-   `vault_grafana_admin_password` is the Grafana admin login.
-   `vault_victoriametrics_password` protects VictoriaMetrics itself: without it,
-   anyone who can reach port `8428` can read, write, or delete fleet metrics.
-   Both the collector on every monitored Mac and the Grafana datasource are
-   rendered with these credentials, so all three must be deployed from the same
-   vault. Set `victoriametrics_auth_enabled: false` in
-   `inventories/production/group_vars/all.yml` only if your network policy
-   already isolates the port and you accept the risk.
+   Set `grafana_admin_password: "{{ vault_grafana_admin_password }}"` and, if enabling VictoriaMetrics auth, `victoriametrics_auth_enabled: true` plus `victoriametrics_auth_password: "{{ vault_victoriametrics_password }}"`. Both the collector on every monitored Mac and the Grafana datasource are rendered with the VictoriaMetrics credentials, so all three must be deployed from the same source. Add `--ask-vault-pass` to the commands below if you vault either secret.
 4. **Run the server setup.**
 
    ```bash
-   ansible-playbook -i inventories/production/hosts.yml site.yml --tags server --ask-become-pass --ask-vault-pass
+   ansible-playbook -i inventories/production/hosts.yml site.yml --tags server --ask-become-pass
    ```
-5. **Verify VictoriaMetrics.** On the monitoring Mac, check `http://localhost:8428/health` and review `/opt/observability/var/log/victoriametrics.err.log` if it does not respond. `/health` is deliberately exempt from authentication; query endpoints are not, so `curl -u observability:<password> http://localhost:8428/api/v1/labels` is the check that credentials are working. An unauthenticated query correctly returns `401`.
+5. **Verify VictoriaMetrics.** On the monitoring Mac, check `http://localhost:8428/health` and review `/opt/observability/var/log/victoriametrics.err.log` if it does not respond. `/health` is deliberately exempt from authentication. If you enabled auth, query endpoints are not exempt, so `curl -u observability:<password> http://localhost:8428/api/v1/labels` is the check that credentials are working, and an unauthenticated query correctly returns `401`.
 6. **Verify Grafana.** Open `http://<monitoring-mac-address>:3000`, sign in with the configured password, and confirm the VictoriaMetrics datasource is present.
 7. **Prepare the agent Mac.** Confirm SSH/sudo access and that it can reach the monitoring Mac on port `8428`.
 8. **Run the agent setup.** Replace the limit with your agent inventory alias.
 
    ```bash
-   ansible-playbook -i inventories/production/hosts.yml site.yml --limit agent-mac-01 --tags agent --ask-become-pass --ask-vault-pass
+   ansible-playbook -i inventories/production/hosts.yml site.yml --limit agent-mac-01 --tags agent --ask-become-pass
    ```
 9. **Verify the collector.** On the agent, run:
 
@@ -102,12 +96,12 @@ After the first monitoring-and-agent test works:
 2. Apply the same agent role to all monitored nodes:
 
    ```bash
-   ansible-playbook -i inventories/production/hosts.yml site.yml --tags agent --ask-become-pass --ask-vault-pass
+   ansible-playbook -i inventories/production/hosts.yml site.yml --tags agent --ask-become-pass
    ```
 3. Target one host during troubleshooting or staged rollout:
 
    ```bash
-   ansible-playbook -i inventories/production/hosts.yml site.yml --limit agent-mac-02 --tags agent --ask-become-pass --ask-vault-pass
+   ansible-playbook -i inventories/production/hosts.yml site.yml --limit agent-mac-02 --tags agent --ask-become-pass
    ```
 4. Check the Grafana fleet dashboard for all hosts.
 

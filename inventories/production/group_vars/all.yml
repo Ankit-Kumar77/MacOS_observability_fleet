@@ -14,9 +14,4 @@ monitoring_server_address: "{{ hostvars[groups['monitoring_server'][0]]['ansible
 # reach port 8428 can read, write or delete fleet metrics. Basic auth covers
 # the query and OTLP-write endpoints; /health deliberately stays open so
 # readiness checks and external uptime probes keep working.
-#
-# Requires vault_victoriametrics_password. Create it with:
-#   ansible-vault encrypt_string 'a-strong-password' --name 'vault_victoriametrics_password'
-victoriametrics_auth_enabled: true
-victoriametrics_auth_username: observability
-victoriametrics_auth_password: "{{ vault_victoriametrics_password }}"
+victoriametrics_auth_enabled: false

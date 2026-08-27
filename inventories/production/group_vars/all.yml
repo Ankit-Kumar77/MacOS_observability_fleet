@@ -15,3 +15,11 @@ monitoring_server_address: "{{ hostvars[groups['monitoring_server'][0]]['ansible
 # the query and OTLP-write endpoints; /health deliberately stays open so
 # readiness checks and external uptime probes keep working.
 victoriametrics_auth_enabled: false
+
+# Applied to the release-archive downloads (roles/observability_common/tasks/
+# install_versioned_archive.yml) so Macs that can only reach the internet
+# through a proxy can still fetch VictoriaMetrics, Grafana and otelcol-contrib
+# from GitHub. Empty by default (direct internet access, no proxy). Override
+# per host/group, or with -e, using get_url's expected keys, e.g.:
+#   -e '{"proxy_env":{"http_proxy":"http://127.0.0.1:9000","https_proxy":"http://127.0.0.1:9000"}}'
+proxy_env: {}

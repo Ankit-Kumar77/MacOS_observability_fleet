@@ -22,6 +22,10 @@
 # Optional:
 #   observability_archive_extra_opts    Extra tar options, e.g.
 #                                       ['--strip-components=1'] (default []).
+#
+# The download step also reads proxy_env (defaults to {} in
+# inventories/production/group_vars/all.yml) for Macs that can only reach
+# GitHub through a proxy.
 
 - name: Download the release archive for {{ observability_archive_component }}
   ansible.builtin.get_url:
@@ -31,6 +35,7 @@
     owner: root
     group: wheel
     mode: '0644'
+  environment: "{{ proxy_env }}"
 
 - name: Create the version directory for {{ observability_archive_component }}
   ansible.builtin.file:

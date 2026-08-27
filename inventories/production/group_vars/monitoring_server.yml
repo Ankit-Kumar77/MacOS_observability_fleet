@@ -1,7 +1,10 @@
-# IMPORTANT: Verify these versions are current and compatible with your target environment before deploying.
-victoriametrics_version: "1.101.0"
-victoriametrics_download_url: "https://github.com/VictoriaMetrics/VictoriaMetrics/releases/download/v{{ victoriametrics_version }}/victoria-metrics-darwin-arm64-v{{ victoriametrics_version }}.tar.gz"
-grafana_version: "10.4.1"
-grafana_download_url: "https://dl.grafana.com/oss/release/grafana-{{ grafana_version }}.darwin-arm64.tar.gz"
-grafana_port: 3000
+---
+# Monitoring Mac secrets and environment overrides.
+#
+# Versions, checksums, ports, paths and readiness tuning are role defaults in
+# roles/observability_server/defaults/main.yml. Override them here only when
+# this environment genuinely requires something different.
+#
+# Requires vault_grafana_admin_password. Create it with:
+#   ansible-vault encrypt_string 'a-strong-password' --name 'vault_grafana_admin_password'
 grafana_admin_password: "{{ vault_grafana_admin_password }}"

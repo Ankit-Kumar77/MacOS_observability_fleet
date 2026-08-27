@@ -1,0 +1,45 @@
+---
+# Filesystem layout. Override in inventory group_vars to relocate the stack.
+base_dir: /opt/observability
+bin_dir: "{{ base_dir }}/bin"
+etc_dir: "{{ base_dir }}/etc"
+var_dir: "{{ base_dir }}/var"
+log_dir: "{{ var_dir }}/log"
+
+# OpenTelemetry Collector Contrib.
+#
+# 0.159.0 is the MINIMUM usable version on macOS. In 0.98.0 the hostmetrics
+# `cpu` and `disk` scrapers return "not implemented yet" on darwin and emit no
+# data at all, which left the CPU and disk dashboard panels permanently empty.
+# Verified on darwin/arm64: 0.159.0 scrapes all six scrapers with no errors.
+# Do not downgrade below 0.159.0 without re-testing on a real Mac.
+otel_collector_version: "0.159.0"
+otel_collector_download_url: "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v{{ otel_collector_version }}/otelcol-contrib_{{ otel_collector_version }}_darwin_arm64.tar.gz"
+# Upstream-published SHA256 (…_darwin_arm64.tar.gz.sha256). Update on version bump.
+otel_collector_checksum: "sha256:7e317b75b1b087ba2150bf95d79e39a394d0d091f1231af6bbebee895d200375"
+otel_collector_install_dir: "{{ bin_dir }}/otelcol-contrib-{{ otel_collector_version }}"
+
+otel_collection_interval: 15s
+
+# launchd ProgramArguments, rendered into the shared plist template.
+otel_collector_program_arguments:
+  - "{{ bin_dir }}/otelcol-contrib"
+  - "--config={{ etc_dir }}/otel-config.yaml"
+
+# macOS/APFS: every volume in a container reports the SAME container-wide
+# capacity, so scraping them all multiplies series without adding any signal.
+# "/" and "/System/Volumes/Data" report identical usage; everything else here
+# is a synthetic or helper volume. Values are regexps (Go RE2 - no lookahead).
+otel_filesystem_exclude_mount_points:
+  - '/System/Volumes/Preboot'
+  - '/System/Volumes/Update.*'
+  - '/System/Volumes/VM'
+  - '/System/Volumes/Hardware'
+  - '/System/Volumes/xarts'
+  - '/System/Volumes/iSCPreboot'
+  - '/System/Volumes/Data/home'
+  - '/Library/Developer/CoreSimulator/Volumes/.*'
+  - '/dev'
+otel_filesystem_exclude_fs_types:
+  - autofs
+  - devfs

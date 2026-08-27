@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+{#-
+  Shared LaunchDaemon plist for all three observability services.
+
+  Rendered from the calling role, which owns the notify/handler pairing:
+
+    - name: Generate the VictoriaMetrics launchd plist
+      ansible.builtin.template:
+        src: "{{ role_path }}/../observability_common/templates/launchd_daemon.plist.j2"
+        dest: /Library/LaunchDaemons/com.observability.victoriametrics.plist
+      vars:
+        launchd_label: com.observability.victoriametrics
+        launchd_program_arguments: [...]
+        launchd_stdout_log: ...
+        launchd_stderr_log: ...
+
+  Required: launchd_label, launchd_program_arguments (list),
+            launchd_stdout_log, launchd_stderr_log.
+  Optional: launchd_working_directory.
+
+  Values are XML-escaped; program arguments are operator-supplied and may
+  legitimately contain characters that are significant in XML.
+-#}
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{{ launchd_label | e }}</string>
+{% if launchd_working_directory | default('') %}
+    <key>WorkingDirectory</key>
+    <string>{{ launchd_working_directory | e }}</string>
+{% endif %}
+    <key>ProgramArguments</key>
+    <array>
+{% for argument in launchd_program_arguments %}
+        <string>{{ argument | e }}</string>
+{% endfor %}
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardErrorPath</key>
+    <string>{{ launchd_stderr_log | e }}</string>
+    <key>StandardOutPath</key>
+    <string>{{ launchd_stdout_log | e }}</string>
+</dict>
+</plist>

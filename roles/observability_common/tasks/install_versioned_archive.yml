@@ -1,0 +1,70 @@
+---
+# Downloads, verifies and unpacks one release into its own versioned directory.
+#
+# Every component in this project is installed the same way: each release lands
+# in a directory named after its version, and a stable symlink is repointed at
+# it. That is what makes a version bump an actual upgrade -- a `creates:` guard
+# on an unversioned path would silently skip extraction and leave the old
+# binary in place.
+#
+# This file deliberately stops short of creating the symlink and of notifying a
+# restart handler. The symlink flip is the moment the running version changes,
+# so it belongs with the caller's own handler, next to the service it restarts.
+#
+# Required variables:
+#   observability_archive_component     Human-readable name, used in task names.
+#   observability_archive_url           Release URL.
+#   observability_archive_checksum      "sha256:..." from the upstream publisher.
+#   observability_archive_tmp_path      Where to stage the download.
+#   observability_archive_install_dir   Versioned destination directory.
+#   observability_archive_binary_path   Absolute path of the binary to verify.
+#
+# Optional:
+#   observability_archive_extra_opts    Extra tar options, e.g.
+#                                       ['--strip-components=1'] (default []).
+
+- name: Download the release archive for {{ observability_archive_component }}
+  ansible.builtin.get_url:
+    url: "{{ observability_archive_url }}"
+    dest: "{{ observability_archive_tmp_path }}"
+    checksum: "{{ observability_archive_checksum }}"
+    owner: root
+    group: wheel
+    mode: '0644'
+
+- name: Create the version directory for {{ observability_archive_component }}
+  ansible.builtin.file:
+    path: "{{ observability_archive_install_dir }}"
+    state: directory
+    owner: root
+    group: wheel
+    mode: '0755'
+
+- name: Extract the release archive for {{ observability_archive_component }}
+  ansible.builtin.unarchive:
+    src: "{{ observability_archive_tmp_path }}"
+    dest: "{{ observability_archive_install_dir }}"
+    remote_src: true
+    owner: root
+    group: wheel
+    extra_opts: "{{ observability_archive_extra_opts | default([]) }}"
+    creates: "{{ observability_archive_binary_path }}"
+
+- name: Stat the installed binary for {{ observability_archive_component }}
+  ansible.builtin.stat:
+    path: "{{ observability_archive_binary_path }}"
+  register: observability_archive_binary
+
+- name: Assert the archive produced a binary for {{ observability_archive_component }}
+  ansible.builtin.assert:
+    that:
+      - observability_archive_binary.stat.exists
+      - observability_archive_binary.stat.isreg
+    fail_msg: >-
+      The {{ observability_archive_component }} archive did not extract
+      {{ observability_archive_binary_path }}.
+
+- name: Remove the downloaded archive for {{ observability_archive_component }}
+  ansible.builtin.file:
+    path: "{{ observability_archive_tmp_path }}"
+    state: absent

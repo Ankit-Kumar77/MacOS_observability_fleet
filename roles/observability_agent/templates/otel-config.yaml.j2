@@ -1,11 +1,35 @@
+# Managed by Ansible (roles/observability_agent). Local edits are overwritten.
+{% if victoriametrics_auth_enabled %}
+extensions:
+  basicauth/victoriametrics:
+    client_auth:
+      username: "{{ victoriametrics_auth_username }}"
+      password: "{{ victoriametrics_auth_password }}"
+
+{% endif %}
 receivers:
   hostmetrics:
-    collection_interval: 15s
+    collection_interval: {{ otel_collection_interval }}
     scrapers:
       cpu:
       memory:
       disk:
       filesystem:
+        # macOS/APFS: sibling volumes in one container all report the same
+        # container-wide capacity, so scraping them all multiplies series
+        # without adding signal. "/" and "/System/Volumes/Data" are kept.
+        exclude_mount_points:
+          match_type: regexp
+          mount_points:
+{% for mount_point in otel_filesystem_exclude_mount_points %}
+            - '{{ mount_point }}'
+{% endfor %}
+        exclude_fs_types:
+          match_type: strict
+          fs_types:
+{% for fs_type in otel_filesystem_exclude_fs_types %}
+            - {{ fs_type }}
+{% endfor %}
       network:
       load:
 
@@ -21,8 +45,15 @@ processors:
 exporters:
   otlphttp:
     metrics_endpoint: "http://{{ monitoring_server_address }}:{{ victoriametrics_port }}/opentelemetry/v1/metrics"
+{% if victoriametrics_auth_enabled %}
+    auth:
+      authenticator: basicauth/victoriametrics
+{% endif %}
 
 service:
+{% if victoriametrics_auth_enabled %}
+  extensions: [basicauth/victoriametrics]
+{% endif %}
   pipelines:
     metrics:
       receivers: [hostmetrics]

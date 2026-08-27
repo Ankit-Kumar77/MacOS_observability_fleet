@@ -1,0 +1,25 @@
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  static-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install tooling
+        # The full `ansible` package, not `ansible-core`: ansible.cfg sets
+        # stdout_callback = yaml, which ships in community.general.
+        run: pip install ansible ansible-lint
+      - name: Syntax check
+        run: ansible-playbook site.yml --syntax-check
+      - name: Inventory resolves
+        run: ansible-inventory -i inventories/production/hosts.yml --list > /dev/null
+      - name: Lint
+        run: ansible-lint

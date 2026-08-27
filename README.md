@@ -56,19 +56,28 @@ Start with one of each. Do not scale out until this flow succeeds on physical Ma
 
 1. **Prepare the monitoring Mac.** Confirm SSH and sudo access, and ensure ports `8428` and `3000` are available.
 2. **Configure inventory.** Add the monitoring Mac and one agent as shown above.
-3. **Provide the Grafana password.** Store it with Ansible Vault, for example:
+3. **Provide the two required secrets.** Store both with Ansible Vault:
 
    ```bash
    ansible-vault encrypt_string 'replace-with-a-strong-password' --name 'vault_grafana_admin_password'
+   ansible-vault encrypt_string 'replace-with-a-strong-password' --name 'vault_victoriametrics_password'
    ```
 
-   Make the resulting vaulted variable available to the playbook. The server group references `vault_grafana_admin_password`.
+   Make the resulting vaulted variables available to the playbook.
+   `vault_grafana_admin_password` is the Grafana admin login.
+   `vault_victoriametrics_password` protects VictoriaMetrics itself: without it,
+   anyone who can reach port `8428` can read, write, or delete fleet metrics.
+   Both the collector on every monitored Mac and the Grafana datasource are
+   rendered with these credentials, so all three must be deployed from the same
+   vault. Set `victoriametrics_auth_enabled: false` in
+   `inventories/production/group_vars/all.yml` only if your network policy
+   already isolates the port and you accept the risk.
 4. **Run the server setup.**
 
    ```bash
    ansible-playbook -i inventories/production/hosts.yml site.yml --tags server --ask-become-pass --ask-vault-pass
    ```
-5. **Verify VictoriaMetrics.** On the monitoring Mac, check `http://localhost:8428/health` and review `/opt/observability/var/log/victoriametrics.err.log` if it does not respond.
+5. **Verify VictoriaMetrics.** On the monitoring Mac, check `http://localhost:8428/health` and review `/opt/observability/var/log/victoriametrics.err.log` if it does not respond. `/health` is deliberately exempt from authentication; query endpoints are not, so `curl -u observability:<password> http://localhost:8428/api/v1/labels` is the check that credentials are working. An unauthenticated query correctly returns `401`.
 6. **Verify Grafana.** Open `http://<monitoring-mac-address>:3000`, sign in with the configured password, and confirm the VictoriaMetrics datasource is present.
 7. **Prepare the agent Mac.** Confirm SSH/sudo access and that it can reach the monitoring Mac on port `8428`.
 8. **Run the agent setup.** Replace the limit with your agent inventory alias.
@@ -104,6 +113,25 @@ After the first monitoring-and-agent test works:
 
 The `observability_agent` role is reused unchanged for any number of monitored Mac Minis, including a fleet of approximately 40.
 
+## Versions and macOS compatibility
+
+| Component | Version | Why this version matters |
+| --- | --- | --- |
+| OpenTelemetry Collector Contrib | `0.159.0` | **Minimum usable version on macOS.** In `0.98.0` the `hostmetrics` `cpu` and `disk` scrapers return `not implemented yet` on darwin and emit nothing, leaving the CPU and disk panels permanently empty. Do not downgrade without re-testing on a Mac. |
+| VictoriaMetrics | `1.150.0` | Runs with `-opentelemetry.usePrometheusNaming`. Without that flag it stores OTLP names verbatim (`system.memory.usage`, label `host.name`) and every dashboard query returns nothing. |
+| Grafana | `13.2.0` | Grafana 11+ removed the separate `grafana-server` binary; the launchd plist uses `grafana server` instead. |
+
+Versions, checksums and tuning are role defaults under
+`roles/<role>/defaults/main.yml`. Override them per environment in
+`inventories/production/group_vars/`. Every download is checksum-verified
+against the upstream-published SHA256, so a version bump also requires updating
+the matching `*_checksum` value.
+
+Each release installs into its own versioned directory with a stable symlink
+(`/opt/observability/bin/otelcol-contrib`, `.../victoria-metrics-prod`,
+`/opt/observability/grafana`), so upgrades are a symlink flip and the previous
+version stays on disk for rollback.
+
 ## What the project installs
 
 | Role | Target | Installed/configured components |
@@ -134,9 +162,22 @@ Software, configuration, data, and logs are placed under `/opt/observability`. T
 
 ## Validation limits
 
-Before physical Macs are available, YAML, Jinja templates, plist XML, SVG, dashboard JSON, variable references, and Ansible syntax can be checked locally when the tools are installed.
+The **data path** has been validated on Apple Silicon by running the real
+binaries locally: collector `0.159.0` scraping `hostmetrics`, exporting OTLP/HTTP
+with basic auth into VictoriaMetrics `1.150.0`, and Grafana `13.2.0` rendering
+this project's provisioned datasource and dashboard. All six dashboard panels
+return data through Grafana's datasource proxy.
 
-Physical Apple Silicon Mac Minis are required to validate archive execution, launchd bootstrap/restart behavior, file ownership at runtime, network policy, service health, and end-to-end metric ingestion. This project must not be considered production-tested until the one-monitoring-Mac plus one-agent-Mac test succeeds.
+What that does **not** cover, and still requires physical Mac Minis:
+
+- launchd bootstrap, `KeepAlive` and restart behaviour for all three services.
+- Running as root under launchd rather than as a logged-in user.
+- File ownership (`root:wheel`) and the `0600` secret files at runtime.
+- Network and firewall policy between monitored Macs and the monitoring Mac.
+- Idempotency across repeated playbook runs on real hosts.
+
+This project must not be considered production-tested until the
+one-monitoring-Mac plus one-agent-Mac test succeeds on real hardware.
 
 ## More documentation
 

@@ -1,13 +1,22 @@
 ---
-# Base installation directory for observability stack
-# IMPORTANT: Confirm this path is suitable for your Mac Minis before deployment.
-base_dir: /opt/observability
-bin_dir: "{{ base_dir }}/bin"
-etc_dir: "{{ base_dir }}/etc"
-var_dir: "{{ base_dir }}/var"
-log_dir: "{{ var_dir }}/log"
+# Cross-role contract. These values must agree between the monitoring Mac and
+# every monitored Mac, so they are defined once here rather than in either
+# role's defaults. Everything else (paths, versions, ports, tuning) is a role
+# default under roles/<role>/defaults/main.yml and may be overridden here.
+
 victoriametrics_port: 8428
 
-# The address of the monitoring server.
-# Dynamically derived from the first host in the monitoring_server group.
+# Derived from the single host in the monitoring_server group so that no real
+# address is ever committed to a role or template.
 monitoring_server_address: "{{ hostvars[groups['monitoring_server'][0]]['ansible_host'] }}"
+
+# VictoriaMetrics ships with no authentication: without this, anyone who can
+# reach port 8428 can read, write or delete fleet metrics. Basic auth covers
+# the query and OTLP-write endpoints; /health deliberately stays open so
+# readiness checks and external uptime probes keep working.
+#
+# Requires vault_victoriametrics_password. Create it with:
+#   ansible-vault encrypt_string 'a-strong-password' --name 'vault_victoriametrics_password'
+victoriametrics_auth_enabled: true
+victoriametrics_auth_username: observability
+victoriametrics_auth_password: "{{ vault_victoriametrics_password }}"

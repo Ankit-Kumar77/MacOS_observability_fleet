@@ -1,4 +1,14 @@
 ---
-- import_tasks: prerequisites.yml
-- import_tasks: opentelemetry.yml
-- import_tasks: verify.yml
+- name: Import prerequisites tasks
+  ansible.builtin.import_tasks: prerequisites.yml
+- name: Import opentelemetry tasks
+  ansible.builtin.import_tasks: opentelemetry.yml
+
+# Handlers normally run at the very end of the play, which would let verify.yml
+# check a collector that is still running the previous configuration. Flush
+# them here so verification always sees the state this run just produced.
+- name: Apply pending service restarts before verification
+  ansible.builtin.meta: flush_handlers
+
+- name: Import verify tasks
+  ansible.builtin.import_tasks: verify.yml

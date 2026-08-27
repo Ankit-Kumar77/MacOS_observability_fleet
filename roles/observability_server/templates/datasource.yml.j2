@@ -1,9 +1,20 @@
+# Managed by Ansible (roles/observability_server). Local edits are overwritten.
 apiVersion: 1
 datasources:
   - name: VictoriaMetrics
+    # Stable uid so provisioned dashboards can reference it explicitly rather
+    # than relying on whichever datasource happens to be default.
+    uid: victoriametrics
     type: prometheus
     access: proxy
     url: http://localhost:{{ victoriametrics_port }}
     isDefault: true
+    editable: false
+{% if victoriametrics_auth_enabled %}
+    basicAuth: true
+    basicAuthUser: "{{ victoriametrics_auth_username }}"
+    secureJsonData:
+      basicAuthPassword: "{{ victoriametrics_auth_password }}"
+{% endif %}
     jsonData:
-      timeInterval: "15s"
+      timeInterval: "{{ grafana_time_interval }}"

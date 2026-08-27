@@ -1,0 +1,61 @@
+---
+# Filesystem layout. Override in inventory group_vars to relocate the stack.
+base_dir: /opt/observability
+bin_dir: "{{ base_dir }}/bin"
+etc_dir: "{{ base_dir }}/etc"
+var_dir: "{{ base_dir }}/var"
+log_dir: "{{ var_dir }}/log"
+
+# VictoriaMetrics.
+victoriametrics_version: "1.150.0"
+victoriametrics_download_url: "https://github.com/VictoriaMetrics/VictoriaMetrics/releases/download/v{{ victoriametrics_version }}/victoria-metrics-darwin-arm64-v{{ victoriametrics_version }}.tar.gz"
+# Upstream-published SHA256 (…_checksums.txt). Update on version bump.
+victoriametrics_checksum: "sha256:ed6e2c06e88fed5865fbe838d34f68613208f79032308cd12ec7d7b13785d978"
+victoriametrics_install_dir: "{{ bin_dir }}/victoria-metrics-{{ victoriametrics_version }}"
+# VictoriaMetrics deletes data older than this. Its own default is 1 month,
+# which is easy to be surprised by; set it explicitly.
+victoriametrics_retention: "90d"
+
+# Grafana.
+grafana_version: "13.2.0"
+grafana_download_url: "https://dl.grafana.com/oss/release/grafana-{{ grafana_version }}.darwin-arm64.tar.gz"
+# Upstream-published SHA256 (…tar.gz.sha256). Update on version bump.
+grafana_checksum: "sha256:338201906b6fb997c58a63eab074d496a43561350ddd1d714b2ef510f3eddea2"
+grafana_install_dir: "{{ base_dir }}/grafana-{{ grafana_version }}"
+grafana_home: "{{ base_dir }}/grafana"
+grafana_port: 3000
+# Matches the agent collection interval so Grafana picks a sensible step.
+grafana_time_interval: "15s"
+
+# Grafana takes noticeably longer than VictoriaMetrics on first boot (sqlite
+# init plus provisioning), so it gets a longer readiness budget.
+victoriametrics_ready_retries: 10
+grafana_ready_retries: 30
+service_ready_delay: 5
+
+# launchd ProgramArguments, rendered into the shared plist template.
+#
+# -opentelemetry.usePrometheusNaming is load-bearing: without it VictoriaMetrics
+# stores OTLP names verbatim, dots included (system.memory.usage, label
+# host.name), and every dashboard query silently returns zero series.
+victoriametrics_base_arguments:
+  - "{{ bin_dir }}/victoria-metrics-prod"
+  - "-storageDataPath={{ var_dir }}/victoriametrics"
+  - "-httpListenAddr=:{{ victoriametrics_port }}"
+  - "-retentionPeriod={{ victoriametrics_retention }}"
+  - "-opentelemetry.usePrometheusNaming"
+
+# Appended only when victoriametrics_auth_enabled. The password is read from a
+# 0600 file rather than passed inline, so it stays out of the world-readable
+# plist and out of `ps` output.
+victoriametrics_auth_arguments:
+  - "-httpAuth.username={{ victoriametrics_auth_username }}"
+  - "-httpAuth.password=file://{{ etc_dir }}/victoriametrics-auth-password"
+
+# Grafana 11+ removed the separate grafana-server binary; the unified `grafana`
+# binary with the `server` subcommand replaces it.
+grafana_program_arguments:
+  - "{{ grafana_home }}/bin/grafana"
+  - "server"
+  - "--config={{ etc_dir }}/grafana/grafana.ini"
+  - "--homepath={{ grafana_home }}"

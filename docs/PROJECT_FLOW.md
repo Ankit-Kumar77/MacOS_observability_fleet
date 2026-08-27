@@ -34,7 +34,7 @@ Variables are split by ownership:
 
 - `roles/<role>/defaults/main.yml` holds versions, checksums, install paths, ports and tuning. Each role is self-contained and can be run against a different inventory.
 - `group_vars/all.yml` holds only the **cross-role contract** - `victoriametrics_port`, `monitoring_server_address`, and the VictoriaMetrics authentication settings. These must agree between the monitoring Mac and every agent, so they are defined exactly once.
-- `group_vars/<group>.yml` holds vault secret references and per-environment overrides.
+- `group_vars/<group>.yml` holds credentials (plain by default, or vault references) and per-environment overrides.
 
 `monitoring_server_address` is derived from the first host in `monitoring_server`; this is how agents receive the destination address without a hard-coded server address. The agent role asserts that this group contains exactly one host with `ansible_host` set, so a misconfigured inventory fails with a clear message instead of an index error.
 

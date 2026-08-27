@@ -102,6 +102,7 @@ These are the things that make this project different from the same stack on Lin
 - **macOS memory states are `free` / `inactive` / `used`** — no `wired`. `inactive` is reclaimable and is not counted as used.
 - **APFS volumes in one container all report the same container-wide capacity.** `/` and `/System/Volumes/Data` are identical; summing across mountpoints multiplies the total. The collector config excludes the synthetic volumes, leaving those two, and the dashboard charts `/` only.
 - **Grafana 11+ removed `grafana-server`.** The plist runs `grafana server --config=... --homepath=...`.
+- **`ansible.builtin.unarchive` refuses macOS's built-in `tar`.** `/usr/bin/tar` is BSD tar (libarchive); the module hard-requires GNU tar for its idempotency bookkeeping, detects the mismatch, falls through to `unzip`, and fails on every `.tar.gz` release. `install_versioned_archive.yml` shells out to `tar -xzf` directly instead (`# noqa: command-instead-of-module`), keeping the same `creates:` idempotency guard and a follow-up ownership-normalization step since root-run `tar` restores whatever owner/group is baked into the archive.
 
 ## Conventions and gotchas
 

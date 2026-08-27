@@ -1,6 +1,6 @@
 # launchd Troubleshooting Guide
 
-> Current status: this project has not been validated on real macOS hardware. Test this guide on one monitoring Mac Mini and one agent Mac Mini before any wider rollout.
+> Current status: real-Mac testing is in progress but launchd service lifecycle has not yet been confirmed working end to end. Test this guide on one monitoring Mac Mini and one agent Mac Mini before any wider rollout.
 
 ## Purpose
 
@@ -94,60 +94,14 @@ Use the equivalent labels for VictoriaMetrics and Grafana. If `bootstrap` fails,
 
 ## Current Ansible implementation
 
-The current roles render the plists and use `ansible.builtin.service` to enable, start, and restart the labels. This keeps the first implementation small, but generic service handling can behave differently across macOS versions and Ansible environments. It may not express the required `launchctl` system-domain bootstrap lifecycle precisely.
+Real-Mac testing confirmed `ansible.builtin.service` has no macOS implementation at all -- it fails immediately with `get_service_tools not implemented on target platform`, before ever touching launchd. The roles now drive `launchctl` directly through two shared task files in `observability_common`, included the same way `install_versioned_archive.yml` is:
 
-Do not change the current implementation until it has been tested on a real Mac Mini. If service loading or restart behavior is unreliable, apply the following focused refactor.
+- **`launchd_ensure_started.yml`** -- included from the last task in each role's install file (`victoriametrics.yml`, `grafana.yml`, `opentelemetry.yml`). Runs `launchctl print system/<label>`, `changed_when: false, failed_when: false`, and only runs `launchctl bootstrap system <plist>` when that check's `rc != 0`. `RunAtLoad` and `KeepAlive` are always `true` in `launchd_daemon.plist.j2`, so a bootstrapped daemon starts immediately and persists across reboots -- there is no separate "enable" step to express.
+- **`launchd_restart.yml`** -- included from each role's restart handler (`Restart VictoriaMetrics`, `Restart Grafana`, `Restart OTel Collector`), notified by the plist template task and every config file the daemon reads. Runs `launchctl bootout system/<label>` (`failed_when: false`, since the label may not be loaded yet) followed by `launchctl bootstrap system <plist>`, so a changed plist definition is actually picked up -- `kickstart -k` alone would restart the process but keep serving whatever definition was already loaded.
 
-## FUTURE refactor: idempotent launchctl management
+Both take `launchd_service_label` and `launchd_service_plist` as vars from the caller, the same parameterization pattern the shared plist template itself uses.
 
-Only after real-Mac testing, replace generic service actions in these existing files:
-
-- `roles/observability_server/tasks/victoriametrics.yml`
-- `roles/observability_server/tasks/grafana.yml`
-- `roles/observability_server/handlers/main.yml`
-- `roles/observability_agent/tasks/opentelemetry.yml`
-- `roles/observability_agent/handlers/main.yml`
-
-Keep the existing plist templates, labels, binaries, paths, roles, and architecture. Replace the `ansible.builtin.service` tasks/handlers with `launchctl` commands that first inspect the system-domain label, bootstrap only when absent, and kickstart when a rendered file changes.
-
-Example for a **FUTURE refactor only**:
-
-```yaml
-- name: Check whether the OTel launchd service is loaded
-  ansible.builtin.command:
-    cmd: launchctl print system/com.observability.otelcol
-  register: otel_launchd_status
-  changed_when: false
-  failed_when: false
-
-- name: Bootstrap OTel launchd service when absent
-  ansible.builtin.command:
-    cmd: launchctl bootstrap system /Library/LaunchDaemons/com.observability.otelcol.plist
-  when: otel_launchd_status.rc != 0
-  changed_when: true
-
-- name: Restart loaded OTel launchd service
-  ansible.builtin.command:
-    cmd: launchctl kickstart -k system/com.observability.otelcol
-  changed_when: true
-```
-
-For a plist whose definition changed, use a controlled reload instead:
-
-```yaml
-- name: Unload previous OTel launchd definition
-  ansible.builtin.command:
-    cmd: launchctl bootout system/com.observability.otelcol
-  changed_when: true
-  failed_when: false
-
-- name: Load updated OTel launchd definition
-  ansible.builtin.command:
-    cmd: launchctl bootstrap system /Library/LaunchDaemons/com.observability.otelcol.plist
-  changed_when: true
-```
-
-Attach the reload sequence to the plist template's notification handler. Use the same label-specific pattern for VictoriaMetrics and Grafana. Keep `changed_when`, `failed_when`, and `when` conditions so repeated playbook runs do not report unnecessary changes or fail merely because a service is not yet loaded.
+**This has not yet been confirmed working end to end on real hardware** -- it replaces a `ansible.builtin.service` call that failed before reaching launchd at all, but the `launchctl` sequence itself still needs a real run against `bootstrap`, `bootout`, and a live `KeepAlive` restart. Use the checklist and manual recovery commands above if it misbehaves.
 
 ## Safe first test
 

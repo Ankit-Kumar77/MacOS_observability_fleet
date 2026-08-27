@@ -1,10 +1,16 @@
 ---
 - name: Restart VictoriaMetrics
-  ansible.builtin.service:
-    name: com.observability.victoriametrics
-    state: restarted
+  ansible.builtin.include_role:
+    name: observability_common
+    tasks_from: launchd_restart
+  vars:
+    launchd_service_label: com.observability.victoriametrics
+    launchd_service_plist: /Library/LaunchDaemons/com.observability.victoriametrics.plist
 
 - name: Restart Grafana
-  ansible.builtin.service:
-    name: com.observability.grafana
-    state: restarted
+  ansible.builtin.include_role:
+    name: observability_common
+    tasks_from: launchd_restart
+  vars:
+    launchd_service_label: com.observability.grafana
+    launchd_service_plist: /Library/LaunchDaemons/com.observability.grafana.plist

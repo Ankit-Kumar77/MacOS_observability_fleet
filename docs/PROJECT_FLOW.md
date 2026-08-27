@@ -127,7 +127,7 @@ The roles render system LaunchDaemon plists in `/Library/LaunchDaemons` for:
 - `com.observability.grafana`
 - `com.observability.otelcol`
 
-The current tasks and handlers use `ansible.builtin.service` to start, enable, and restart these labels. This is the current implementation, not a claim of tested runtime behavior. For diagnostics and a future, controlled `launchctl` refactor path, see [LAUNCHD_TROUBLESHOOTING.md](../LAUNCHD_TROUBLESHOOTING.md).
+`ansible.builtin.service` has no macOS implementation, so the tasks and handlers drive `launchctl` directly instead: bootstrap-if-not-loaded to start/enable, bootout+bootstrap on restart. This is the current implementation, not a claim of tested runtime behavior. For diagnostics and manual recovery, see [LAUNCHD_TROUBLESHOOTING.md](../LAUNCHD_TROUBLESHOOTING.md).
 
 ## First Mac test flow
 
@@ -138,7 +138,7 @@ The current tasks and handlers use `ansible.builtin.service` to start, enable, a
 5. Confirm metrics arrive and appear in Grafana.
 6. Re-run the same plays to assess idempotency and observe launchd behavior.
 
-This is the required validation point before scaling. The project has not been validated on real macOS hardware yet.
+This is the required validation point before scaling. Real-Mac testing is in progress; launchd service lifecycle has not yet been confirmed working end to end.
 
 ## Scaling flow
 

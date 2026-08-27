@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 An Ansible project (no application code, no unit tests) that deploys host-metric observability to a fleet of Apple Silicon Mac Minis. One Mac runs VictoriaMetrics + Grafana; every other Mac runs an OpenTelemetry Collector.
 
-**Status: the data path is verified, the launchd path is not.** The collector → OTLP/HTTP → VictoriaMetrics → Grafana pipeline has been run end to end with the real binaries on Apple Silicon, and all six dashboard panels return data. Nothing has ever run under launchd on a real Mac Mini. Do not describe service lifecycle, root-under-launchd behaviour, or idempotency as working.
+**Status: the data path is verified, the launchd path is not.** The collector → OTLP/HTTP → VictoriaMetrics → Grafana pipeline has been run end to end with the real binaries on Apple Silicon, and all six dashboard panels return data. Real-Mac testing surfaced that `ansible.builtin.service` has no macOS implementation at all (`get_service_tools not implemented on target platform`), so service lifecycle has been switched to direct `launchctl` commands per the plan in `LAUNCHD_TROUBLESHOOTING.md`. That switch has not yet been confirmed working end to end on real hardware. Do not describe service lifecycle, root-under-launchd behaviour, or idempotency as working until it has.
 
 ## Commands
 
@@ -114,7 +114,7 @@ These are the things that make this project different from the same stack on Lin
 - **Old versions are left in place** after an upgrade, enabling rollback by reverting the version variable. Nothing prunes them, and these binaries are large (collector ~334 MB, Grafana ~1.3 GB).
 - **Every download is checksum-pinned** against the upstream-published SHA256. A version bump must update the matching `*_checksum`, or the download fails closed.
 - **Secrets are `0600` and `no_log`.** `grafana.ini`, `otel-config.yaml`, the provisioned datasource, and (when `victoriametrics_auth_enabled: true`) the VictoriaMetrics password file all carry credentials. The VictoriaMetrics password is passed to launchd as `file://...` rather than an argument so it stays out of the world-readable plist and out of `ps`.
-- **Do not replace `ansible.builtin.service` with `launchctl` yet.** `LAUNCHD_TROUBLESHOOTING.md` contains a fully-specified refactor that is explicitly gated on the first successful real-Mac test.
+- **Service lifecycle uses `launchctl` directly, not `ansible.builtin.service`.** The module has no macOS implementation at all. `observability_common`'s `launchd_ensure_started.yml` (bootstrap-if-not-loaded, included from each role's install task) and `launchd_restart.yml` (bootout + bootstrap, included from each restart handler) replace it, per the plan in `LAUNCHD_TROUBLESHOOTING.md`. `RunAtLoad`/`KeepAlive` in the shared plist template mean a bootstrapped daemon starts immediately and persists across reboots without a separate "enable" step.
 - **Inventory holds `REPLACE_WITH_*` placeholders by design.** Never commit real addresses, SSH users, or credentials.
 - `.ansible-lint` runs the `production` profile. `var-naming[no-role-prefix]` is deliberately skipped — see the comment there.
 

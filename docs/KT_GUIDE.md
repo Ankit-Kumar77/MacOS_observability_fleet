@@ -133,7 +133,7 @@ Use one monitoring Mac and one worker Mac for the first real-world test.
 
 1. Prepare the monitoring Mac with SSH and sudo access; check ports `8428` and `3000` are available.
 2. Add the monitoring Mac and one worker to the inventory.
-3. Run the server play: `ansible-playbook -i inventories/production/hosts.yml site.yml --tags server --ask-become-pass --ask-vault-pass`.
+3. Run the server play: `ansible-playbook -i inventories/production/hosts.yml site.yml --tags server --ask-become-pass`.
 4. Verify VictoriaMetrics at `http://localhost:8428/health` on the monitoring Mac.
 5. Verify Grafana at `http://<monitoring-mac-address>:3000` and confirm its datasource.
 6. Prepare one worker Mac with SSH/sudo access and network reachability to the monitoring Mac on port `8428`.
@@ -148,13 +148,13 @@ Use one monitoring Mac and one worker Mac for the first real-world test.
 The final fleet size is not fixed. To scale, add each Mac to `monitored_nodes` in the inventory and run the same agent role:
 
 ```bash
-ansible-playbook -i inventories/production/hosts.yml site.yml --tags agent --ask-become-pass --ask-vault-pass
+ansible-playbook -i inventories/production/hosts.yml site.yml --tags agent --ask-become-pass
 ```
 
 To stage deployment or troubleshoot one Mac, use its inventory alias:
 
 ```bash
-ansible-playbook -i inventories/production/hosts.yml site.yml --limit <worker-alias> --tags agent --ask-become-pass --ask-vault-pass
+ansible-playbook -i inventories/production/hosts.yml site.yml --limit <worker-alias> --tags agent --ask-become-pass
 ```
 
 No new role is needed for more Macs. Inventory membership determines where `observability_agent` runs.
@@ -183,8 +183,9 @@ For example, `monitoring_server_address` is derived from the first host in the `
 
 - Use SSH keys or an approved SSH authentication mechanism for Ansible access.
 - The Ansible user needs sudo privileges because installation paths and LaunchDaemon plists are system locations.
-- Keep the Grafana administrator password in Ansible Vault or another approved secret store.
-- Do not commit passwords, private keys, or production credentials to Git.
+- **By default this project ships with no auth on either service**: `victoriametrics_auth_enabled: false` and a plain, checked-in `grafana_admin_password: admin`. This is intended for local/testing use only — anyone able to reach port 8428 can read, write or delete fleet metrics, and Grafana logs in with the default credentials.
+- For anything beyond local testing, set `victoriametrics_auth_enabled: true` with a real username/password, and replace `grafana_admin_password` with a real value — plain or via Ansible Vault (`ansible-vault encrypt_string`).
+- Do not commit real passwords, private keys, or production credentials to Git.
 - Limit access to ports `8428` and `3000` according to the management network policy.
 
 ## 16. Automated, manual, and real-Mac work
@@ -192,7 +193,7 @@ For example, `monitoring_server_address` is derived from the first host in the `
 | Category | Responsibility |
 | --- | --- |
 | Automated by Ansible | Directories, downloads, archive extraction, templates, datasource/dashboard provisioning, plist creation, service requests, and verification tasks. |
-| Manual initial setup | Select Macs, prepare inventory, provide SSH/sudo access, provide Vault secrets, and permit network access. |
+| Manual initial setup | Select Macs, prepare inventory, provide SSH/sudo access, optionally set real credentials (plain or vaulted) if enabling auth, and permit network access. |
 | Requires real-Mac validation | Apple Silicon archive execution, launchd loading/restarts, runtime permissions, firewall policy, service health, and end-to-end metric ingestion. |
 
 ## 17. Common teammate questions
@@ -208,7 +209,7 @@ For example, `monitoring_server_address` is derived from the first host in the `
 | Why not Prometheus? | It is not part of this design; VictoriaMetrics receives OTLP/HTTP metrics directly. |
 | Why is the collector version pinned so specifically? | On macOS the `cpu` and `disk` scrapers were unimplemented until well after 0.98.0. Below 0.159.0 the CPU and disk panels cannot populate at all. |
 | Why does VictoriaMetrics need a naming flag? | Without `-opentelemetry.usePrometheusNaming` it stores OTLP names verbatim (`system.memory.usage`, label `host.name`), which matches no dashboard query. |
-| Why does VictoriaMetrics need a password? | It has no authentication of its own. Anyone able to reach port 8428 could otherwise read, write or delete fleet metrics. |
+| Does VictoriaMetrics need a password? | It has no authentication of its own, so anyone able to reach port 8428 can read, write or delete fleet metrics. Auth is off by default (`victoriametrics_auth_enabled: false`) for local/testing use; set it to `true` with real credentials for anything beyond that. |
 | Why VictoriaMetrics? | It is the configured metric store and supports the required OTLP/HTTP ingestion endpoint. |
 | Why Grafana? | It provides the configured datasource and dashboards for metric visualization. |
 | Why one monitoring Mac? | The inventory has one `monitoring_server` target that centralizes storage and visualization. |
@@ -241,8 +242,8 @@ The repository is a template for a real environment. It avoids embedding environ
 - Exactly one Mac assigned to `monitoring_server`.
 - All collector Macs assigned to `monitored_nodes`.
 - A reachable monitoring-Mac address; agents derive this from the selected monitoring-server inventory host.
-- The Grafana password through `vault_grafana_admin_password`.
-- The VictoriaMetrics basic-auth password through `vault_victoriametrics_password`. The collector on every Mac, the Grafana datasource and VictoriaMetrics itself are rendered from it, so all three must come from the same vault.
+- A real Grafana admin password (`grafana_admin_password`, plain or vaulted) if the checked-in default (`admin`) is not acceptable for the target environment.
+- `victoriametrics_auth_enabled: true` plus a real username/password if VictoriaMetrics needs auth (it ships disabled). The collector on every Mac, the Grafana datasource and VictoriaMetrics itself are all rendered from the same credentials, so all three must be deployed from the same source.
 - Any legitimate environment changes to base paths, ports, or versions in group variables. The default paths and ports should only be changed when the environment requires it.
 
 Template inventory:

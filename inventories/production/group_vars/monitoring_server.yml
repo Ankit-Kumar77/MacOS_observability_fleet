@@ -5,6 +5,7 @@
 # roles/observability_server/defaults/main.yml. Override them here only when
 # this environment genuinely requires something different.
 #
-# Requires vault_grafana_admin_password. Create it with:
-#   ansible-vault encrypt_string 'a-strong-password' --name 'vault_grafana_admin_password'
-grafana_admin_password: "{{ vault_grafana_admin_password }}"
+# Grafana requires some admin password to start; this plain default removes
+# the vault dependency for local/testing use. Override it here (plain or
+# vaulted) for anything beyond that.
+grafana_admin_password: admin

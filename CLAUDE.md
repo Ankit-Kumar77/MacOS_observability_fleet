@@ -19,16 +19,18 @@ ansible-playbook site.yml --syntax-check # static validation, no hosts touched
 ansible-inventory --list                 # confirms group membership + var resolution
 ansible-lint                             # must pass; config in .ansible-lint
 
-# Deploy (two vault secrets are required - see "Secrets" below)
-ansible-playbook -i inventories/production/hosts.yml site.yml --tags server --ask-become-pass --ask-vault-pass
-ansible-playbook -i inventories/production/hosts.yml site.yml --tags agent  --ask-become-pass --ask-vault-pass
+# Deploy (no vault secrets required by default - see "Secrets" below)
+ansible-playbook -i inventories/production/hosts.yml site.yml --tags server --ask-become-pass
+ansible-playbook -i inventories/production/hosts.yml site.yml --tags agent  --ask-become-pass
 
 # One host, for staged rollout or troubleshooting
-ansible-playbook -i inventories/production/hosts.yml site.yml --limit mac-mini-02 --tags agent --ask-become-pass --ask-vault-pass
+ansible-playbook -i inventories/production/hosts.yml site.yml --limit mac-mini-02 --tags agent --ask-become-pass
 
 # Health/verification tasks only
-ansible-playbook -i inventories/production/hosts.yml site.yml --tags verify --ask-become-pass --ask-vault-pass
+ansible-playbook -i inventories/production/hosts.yml site.yml --tags verify --ask-become-pass
 ```
+
+Add `--ask-vault-pass` only if you have re-enabled auth with vaulted credentials (see "Secrets" below).
 
 ### Testing changes without Mac Minis
 
@@ -103,21 +105,23 @@ These are the things that make this project different from the same stack on Lin
 - **`{{ grafana_home }}` must not be created as a directory.** It is a symlink, and `ansible.builtin.file` refuses to replace a real directory with one. It is deliberately excluded from the `prerequisites.yml` directory loop; `{{ var_dir }}/grafana` (Grafana's data dir) is a real directory and stays.
 - **Old versions are left in place** after an upgrade, enabling rollback by reverting the version variable. Nothing prunes them, and these binaries are large (collector ~334 MB, Grafana ~1.3 GB).
 - **Every download is checksum-pinned** against the upstream-published SHA256. A version bump must update the matching `*_checksum`, or the download fails closed.
-- **Secrets are `0600` and `no_log`.** `grafana.ini`, `otel-config.yaml`, the provisioned datasource, and the VictoriaMetrics password file all carry credentials. The VictoriaMetrics password is passed to launchd as `file://...` rather than an argument so it stays out of the world-readable plist and out of `ps`.
+- **Secrets are `0600` and `no_log`.** `grafana.ini`, `otel-config.yaml`, the provisioned datasource, and (when `victoriametrics_auth_enabled: true`) the VictoriaMetrics password file all carry credentials. The VictoriaMetrics password is passed to launchd as `file://...` rather than an argument so it stays out of the world-readable plist and out of `ps`.
 - **Do not replace `ansible.builtin.service` with `launchctl` yet.** `LAUNCHD_TROUBLESHOOTING.md` contains a fully-specified refactor that is explicitly gated on the first successful real-Mac test.
 - **Inventory holds `REPLACE_WITH_*` placeholders by design.** Never commit real addresses, SSH users, or credentials.
 - `.ansible-lint` runs the `production` profile. `var-naming[no-role-prefix]` is deliberately skipped — see the comment there.
 
 ## Secrets
 
-Two vaulted variables are required; the deployment fails closed without them.
+**No vault is required by default.** `victoriametrics_auth_enabled` is `false` in `inventories/production/group_vars/all.yml`, and `grafana_admin_password` in `inventories/production/group_vars/monitoring_server.yml` is a plain, checked-in default (`admin`) — this is intentional for local/testing use, and it means port 8428 on the monitoring Mac is reachable by anyone on the network, unauthenticated, with read/write/delete on fleet metrics.
+
+To re-enable auth for a real deployment:
 
 | Variable | Purpose |
 | --- | --- |
-| `vault_grafana_admin_password` | Grafana admin login. |
-| `vault_victoriametrics_password` | VictoriaMetrics basic auth. Without it anyone reaching port 8428 can read, write or delete fleet metrics. |
+| `grafana_admin_password` | Grafana admin login. Set directly, or point at a vaulted var (`ansible-vault encrypt_string 'a-strong-password' --name 'vault_grafana_admin_password'`, then `grafana_admin_password: "{{ vault_grafana_admin_password }}"`). |
+| `victoriametrics_auth_enabled` / `victoriametrics_auth_username` / `victoriametrics_auth_password` | Set `victoriametrics_auth_enabled: true` and provide the username/password (plain or vaulted, same pattern as above) to require basic auth on VictoriaMetrics. |
 
-The collector, the Grafana datasource and VictoriaMetrics itself are all rendered from the same credentials, so all three must be deployed from the same vault. `/health` is deliberately exempt from auth so readiness probes keep working; query and OTLP-write endpoints return `401` unauthenticated.
+When VictoriaMetrics auth is enabled, the collector, the Grafana datasource and VictoriaMetrics itself must all be rendered from the same credentials, so deploy all three from the same source. `/health` is deliberately exempt from auth so readiness probes keep working; query and OTLP-write endpoints return `401` unauthenticated when auth is on.
 
 ## Reference docs
 

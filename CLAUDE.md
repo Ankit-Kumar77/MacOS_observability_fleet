@@ -68,12 +68,15 @@ A third role, `observability_common`, holds what both roles share. It has no `ta
 | --- | --- |
 | `tasks/base_directories.yml` | Creates the `/opt/observability` layout. Callers add role-specific paths via `observability_extra_directories`. |
 | `tasks/install_versioned_archive.yml` | Download → checksum-verify → versioned extract → stat → assert → clean up the temp archive. Used once per component. |
+| `tasks/launchd_ensure_started.yml` | `launchctl print` → `bootstrap` if not loaded. Included from each role's install task. |
+| `tasks/launchd_restart.yml` | `launchctl bootout` → `bootstrap`. Included from each role's restart handler. |
 | `templates/launchd_daemon.plist.j2` | One plist for all three daemons, parameterised by `launchd_label`, `launchd_program_arguments`, the log paths, and an optional `launchd_working_directory`. |
 
-Two rules keep this safe, and both are load-bearing:
+Three rules keep this safe, and all three are load-bearing:
 
 - **`install_versioned_archive.yml` deliberately does not create the symlink or notify a handler.** The symlink flip is the moment the running version changes, so it lives in the calling role next to the handler it notifies. Notifying a caller's handler from inside an included role is the fragile part; this split avoids needing it at all.
 - **The shared plist is referenced as `{{ role_path }}/../observability_common/templates/launchd_daemon.plist.j2`.** Ansible resolves a bare `src:` against the *calling* role's `templates/`, which would not find it.
+- **`launchd_restart.yml` is pulled into handlers with `ansible.builtin.include_tasks: file: "{{ role_path }}/../observability_common/tasks/launchd_restart.yml"`, not `include_role`.** Ansible rejects `include_role`/`import_role` as a handler action outright ("Using 'ansible.builtin.include_role' as a handler is not supported"); only task-level includes work there. `launchd_ensure_started.yml` has no such restriction and is included the normal `include_role` + `tasks_from` way from each role's install task, since those are ordinary tasks, not handlers.
 
 `ProgramArguments` for each daemon are lists in that role's `defaults/main.yml`, so they are documented and overridable rather than buried in XML. VictoriaMetrics builds its list as `victoriametrics_base_arguments + (victoriametrics_auth_arguments if victoriametrics_auth_enabled else [])`.
 

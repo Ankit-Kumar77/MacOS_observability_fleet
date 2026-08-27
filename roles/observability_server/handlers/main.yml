@@ -1,16 +1,14 @@
 ---
 - name: Restart VictoriaMetrics
-  ansible.builtin.include_role:
-    name: observability_common
-    tasks_from: launchd_restart
+  ansible.builtin.include_tasks:
+    file: "{{ role_path }}/../observability_common/tasks/launchd_restart.yml"
   vars:
     launchd_service_label: com.observability.victoriametrics
     launchd_service_plist: /Library/LaunchDaemons/com.observability.victoriametrics.plist
 
 - name: Restart Grafana
-  ansible.builtin.include_role:
-    name: observability_common
-    tasks_from: launchd_restart
+  ansible.builtin.include_tasks:
+    file: "{{ role_path }}/../observability_common/tasks/launchd_restart.yml"
   vars:
     launchd_service_label: com.observability.grafana
     launchd_service_plist: /Library/LaunchDaemons/com.observability.grafana.plist

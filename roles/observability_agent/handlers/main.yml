@@ -1,6 +1,8 @@
 ---
-
 - name: Restart OTel Collector
-  ansible.builtin.service:
-    name: com.observability.otelcol
-    state: restarted
+  ansible.builtin.include_role:
+    name: observability_common
+    tasks_from: launchd_restart
+  vars:
+    launchd_service_label: com.observability.otelcol
+    launchd_service_plist: /Library/LaunchDaemons/com.observability.otelcol.plist

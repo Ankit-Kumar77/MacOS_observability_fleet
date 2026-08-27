@@ -1,0 +1,22 @@
+---
+# Reloads a LaunchDaemon after its plist or a config file it reads has
+# changed. bootout followed by bootstrap picks up the new definition;
+# kickstart -k alone would restart the process but keep serving whatever
+# definition launchd already had loaded. Meant to be included from a handler
+# notified by the plist template task and any config templates the daemon
+# reads.
+#
+# Required variables:
+#   launchd_service_label   The Label declared in the plist.
+#   launchd_service_plist   Absolute path to the rendered plist.
+
+- name: Unload the previous {{ launchd_service_label }} definition
+  ansible.builtin.command:
+    cmd: "launchctl bootout system/{{ launchd_service_label }}"
+  failed_when: false
+  changed_when: true
+
+- name: Load the current {{ launchd_service_label }} definition
+  ansible.builtin.command:
+    cmd: "launchctl bootstrap system {{ launchd_service_plist }}"
+  changed_when: true

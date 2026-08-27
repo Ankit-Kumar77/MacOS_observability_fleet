@@ -167,7 +167,7 @@ No new role is needed for more Macs. Inventory membership determines where `obse
 - `com.observability.grafana`
 - `com.observability.otelcol`
 
-All three are rendered from a single shared template, `roles/observability_common/templates/launchd_daemon.plist.j2`. Each calling role supplies the label, the `ProgramArguments` list (kept in that role's `defaults/main.yml`) and the log paths, so the three plists cannot drift apart. The current roles use `ansible.builtin.service` for service requests. Actual launchd behavior has not been validated on a real Mac Mini; use [LAUNCHD_TROUBLESHOOTING.md](../LAUNCHD_TROUBLESHOOTING.md) for diagnostic commands and the future refactor guidance.
+All three are rendered from a single shared template, `roles/observability_common/templates/launchd_daemon.plist.j2`. Each calling role supplies the label, the `ProgramArguments` list (kept in that role's `defaults/main.yml`) and the log paths, so the three plists cannot drift apart. `ansible.builtin.service` has no macOS implementation, so the roles drive `launchctl` directly (bootstrap-if-not-loaded on install, bootout+bootstrap on restart) via shared task files in `observability_common`. This has not yet been confirmed working end to end on a real Mac Mini; use [LAUNCHD_TROUBLESHOOTING.md](../LAUNCHD_TROUBLESHOOTING.md) for diagnostic commands and manual recovery.
 
 ## 14. Variables and dynamic configuration
 

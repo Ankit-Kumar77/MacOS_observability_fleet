@@ -51,7 +51,9 @@
   notify: Restart OTel Collector
 
 - name: Ensure OTel Collector is started and enabled
-  ansible.builtin.service:
-    name: com.observability.otelcol
-    state: started
-    enabled: true
+  ansible.builtin.include_role:
+    name: observability_common
+    tasks_from: launchd_ensure_started
+  vars:
+    launchd_service_label: com.observability.otelcol
+    launchd_service_plist: /Library/LaunchDaemons/com.observability.otelcol.plist

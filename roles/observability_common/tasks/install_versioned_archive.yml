@@ -26,6 +26,22 @@
 # The download step also reads proxy_env (defaults to {} in
 # inventories/production/group_vars/all.yml) for Macs that can only reach
 # GitHub through a proxy.
+#
+# The download/extract steps below are skipped entirely once this exact
+# version is already installed. Without this check, a re-run after a
+# partially-successful prior run (e.g. everything up through this component
+# succeeded, but a later task in the same play failed) always re-downloads,
+# because the temp archive is deleted on success and leaves nothing for
+# get_url's own checksum-match skip to compare against -- even though the
+# desired end state already exists on disk. This is safe against the
+# "creates: on an unversioned path" footgun above because the path checked
+# here is the versioned binary path, not a stable symlink: a version bump
+# changes it, so a new version is still correctly downloaded and extracted.
+
+- name: Check whether {{ observability_archive_component }} is already installed
+  ansible.builtin.stat:
+    path: "{{ observability_archive_binary_path }}"
+  register: observability_archive_preinstalled
 
 - name: Download the release archive for {{ observability_archive_component }}
   ansible.builtin.get_url:
@@ -36,6 +52,7 @@
     group: wheel
     mode: '0644'
   environment: "{{ proxy_env }}"
+  when: not observability_archive_preinstalled.stat.exists
 
 - name: Create the version directory for {{ observability_archive_component }}
   ansible.builtin.file:
@@ -44,6 +61,7 @@
     owner: root
     group: wheel
     mode: '0755'
+  when: not observability_archive_preinstalled.stat.exists
 
 # ansible.builtin.unarchive refuses to drive macOS's built-in tar: it detects
 # /usr/bin/tar as BSD tar (libarchive) and hard-requires GNU tar for its
@@ -57,6 +75,7 @@
     argv: "{{ ['tar', '-xzf', observability_archive_tmp_path, '-C', observability_archive_install_dir] + (observability_archive_extra_opts | default([])) }}"
     creates: "{{ observability_archive_binary_path }}"
   register: observability_archive_extract
+  when: not observability_archive_preinstalled.stat.exists
 
 # tar run as root restores whatever owner/group is baked into the archive,
 # which is not guaranteed to be root:wheel, so normalize it explicitly --
@@ -87,3 +106,4 @@
   ansible.builtin.file:
     path: "{{ observability_archive_tmp_path }}"
     state: absent
+  when: not observability_archive_preinstalled.stat.exists

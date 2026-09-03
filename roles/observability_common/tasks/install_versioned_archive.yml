@@ -38,7 +38,7 @@
 # here is the versioned binary path, not a stable symlink: a version bump
 # changes it, so a new version is still correctly downloaded and extracted.
 
-- name: Check whether {{ observability_archive_component }} is already installed
+- name: Check for an existing install of {{ observability_archive_component }}
   ansible.builtin.stat:
     path: "{{ observability_archive_binary_path }}"
   register: observability_archive_preinstalled
@@ -80,7 +80,13 @@
 # tar run as root restores whatever owner/group is baked into the archive,
 # which is not guaranteed to be root:wheel, so normalize it explicitly --
 # unarchive did this itself via its owner/group parameters.
-- name: Normalize ownership of the extracted release for {{ observability_archive_component }}
+#
+# no-handler is suppressed rather than obeyed: this is a filesystem fixup for
+# the extraction two tasks up, not a service action, and it has to complete
+# before the stat/assert below. A handler would fire at the end of the play,
+# long after those checks. This file is also a reusable include with no
+# handlers of its own, so there is nowhere correct to put one.
+- name: Normalize ownership of the extracted release for {{ observability_archive_component }} # noqa: no-handler
   ansible.builtin.file:
     path: "{{ observability_archive_install_dir }}"
     owner: root

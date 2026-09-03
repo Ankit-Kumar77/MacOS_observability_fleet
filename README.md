@@ -183,3 +183,8 @@ one-monitoring-Mac plus one-agent-Mac test succeeds on real hardware.
 - [Project internal flow](docs/PROJECT_FLOW.md)
 - [Confluence-ready project overview](docs/project-overview.md)
 - [launchd troubleshooting](LAUNCHD_TROUBLESHOOTING.md)
+- [Contributing guide](CONTRIBUTING.md)
+
+## License
+
+Released under the [MIT License](LICENSE).

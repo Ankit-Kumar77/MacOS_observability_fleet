@@ -14,14 +14,14 @@
 # bootstrapped daemon starts immediately and persists across reboots without
 # a separate "enable" step.
 
-- name: Check whether {{ launchd_service_label }} is loaded
+- name: Check whether launchd has already loaded {{ launchd_service_label }}
   ansible.builtin.command:
     cmd: "launchctl print system/{{ launchd_service_label }}"
   register: observability_launchd_status
   changed_when: false
   failed_when: false
 
-- name: Bootstrap {{ launchd_service_label }} when not loaded
+- name: Bootstrap into the system domain {{ launchd_service_label }}
   ansible.builtin.command:
     cmd: "launchctl bootstrap system {{ launchd_service_plist }}"
   when: observability_launchd_status.rc != 0

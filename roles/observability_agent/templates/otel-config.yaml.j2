@@ -32,6 +32,28 @@ receivers:
 {% endfor %}
       network:
       load:
+{% if otel_latency_check_enabled | bool %}
+
+  # TCP connect time to VictoriaMetrics = network round-trip latency from this
+  # Mac to the monitoring Mac. Needs no credentials, so it is unaffected by
+  # victoriametrics_auth_enabled.
+  tcp_check/monitoring_server:
+    collection_interval: {{ otel_collection_interval }}
+    targets:
+      - endpoint: "{{ monitoring_server_address }}:{{ victoriametrics_port }}"
+{% endif %}
+{% if otel_ssh_monitoring_enabled | bool %}
+
+  # SSH access state written by com.observability.sshstate. Each snapshot is
+  # atomically replaced and carries a fresh timestamp in its first bytes, so
+  # the receiver reads each one exactly once; exclude_older_than stops a stale
+  # snapshot being re-read after a collector restart.
+  otlp_json_file/ssh_state:
+    include: ["{{ otel_ssh_state_dir }}/ssh-state.json"]
+    start_at: beginning
+    poll_interval: 5s
+    exclude_older_than: {{ (otel_ssh_check_interval | int) * 3 }}s
+{% endif %}
 
 processors:
   batch:
@@ -56,6 +78,6 @@ service:
 {% endif %}
   pipelines:
     metrics:
-      receivers: [hostmetrics]
+      receivers: [hostmetrics{{ ', tcp_check/monitoring_server' if otel_latency_check_enabled | bool else '' }}{{ ', otlp_json_file/ssh_state' if otel_ssh_monitoring_enabled | bool else '' }}]
       processors: [resourcedetection, batch]
       exporters: [otlphttp]

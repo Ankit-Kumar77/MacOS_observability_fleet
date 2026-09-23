@@ -1,0 +1,42 @@
+---
+# 0700: the snapshot names who is logged in over SSH and from where.
+- name: Create the SSH state directory
+  ansible.builtin.file:
+    path: "{{ otel_ssh_state_dir }}"
+    state: directory
+    owner: root
+    group: wheel
+    mode: '0700'
+
+# launchd starts a fresh copy of the script every interval, so a script change
+# takes effect on the next run without a reload.
+- name: Install the SSH state collection script
+  ansible.builtin.template:
+    src: ssh_state.sh.j2
+    dest: "{{ otel_ssh_state_program_arguments[0] }}"
+    owner: root
+    group: wheel
+    mode: '0755'
+
+- name: Generate SSH state launchd plist
+  ansible.builtin.template:
+    src: "{{ role_path }}/../observability_common/templates/launchd_daemon.plist.j2"
+    dest: /Library/LaunchDaemons/com.observability.sshstate.plist
+    owner: root
+    group: wheel
+    mode: '0644'
+  vars:
+    launchd_label: com.observability.sshstate
+    launchd_program_arguments: "{{ otel_ssh_state_program_arguments }}"
+    launchd_start_interval: "{{ otel_ssh_check_interval }}"
+    launchd_stdout_log: "{{ log_dir }}/sshstate.out.log"
+    launchd_stderr_log: "{{ log_dir }}/sshstate.err.log"
+  notify: Restart SSH state collector
+
+- name: Ensure the SSH state collector is started and enabled
+  ansible.builtin.include_role:
+    name: observability_common
+    tasks_from: launchd_ensure_started
+  vars:
+    launchd_service_label: com.observability.sshstate
+    launchd_service_plist: /Library/LaunchDaemons/com.observability.sshstate.plist

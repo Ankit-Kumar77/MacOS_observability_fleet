@@ -65,9 +65,9 @@ When `observability_server` runs, it performs the following sequence:
 4. Renders `com.observability.victoriametrics.plist` with the binary, data path, port, retention, the Prometheus-naming flag, and the auth credentials.
 5. Downloads, checksum-verifies and extracts Grafana into a versioned directory, then repoints the `/opt/observability/grafana` symlink.
 6. Renders `grafana.ini` and the Grafana launchd plist.
-7. Provisions the VictoriaMetrics datasource, dashboard provider, and default Mac Mini dashboard.
+7. Provisions the VictoriaMetrics datasource, dashboard provider, the Mac Mini fleet dashboard, and the Mac Mini detail dashboard.
 8. Requests service start/enable, then flushes handlers so verification sees the current configuration.
-9. Verifies both health endpoints, that VictoriaMetrics accepts the configured credentials and rejects unauthenticated queries, the Grafana datasource API, and that the fleet dashboard was provisioned.
+9. Verifies both health endpoints, that VictoriaMetrics accepts the configured credentials and rejects unauthenticated queries, the Grafana datasource API, and that the fleet and detail dashboards were provisioned.
 
 VictoriaMetrics listens on the shared `victoriametrics_port` variable, currently `8428`. Grafana listens on the server-only `grafana_port`, currently `3000`.
 
@@ -79,7 +79,7 @@ When `observability_agent` runs, it:
 2. Downloads and checksum-verifies the configured Darwin ARM64 `otelcol-contrib` archive.
 3. Extracts it into a versioned directory, asserts the binary exists, and repoints the stable `/opt/observability/bin/otelcol-contrib` symlink.
 4. Renders `/opt/observability/etc/otel-config.yaml` as `0600` (it carries the VictoriaMetrics password).
-5. Renders `com.observability.otelcol.plist` with the binary, configuration, and log paths.
+5. Renders `com.observability.otelcol.plist` with the binary, configuration, and log paths. Before that, it installs the SSH state script (`bin/observability-ssh-state`), its `0700` snapshot directory and the periodic `com.observability.sshstate.plist`.
 6. Requests collector start/enable, then flushes handlers.
 7. Checks reachability to the monitoring Mac on port `8428`, validates the rendered configuration with `otelcol-contrib validate`, and waits for this Mac's metrics to actually appear in VictoriaMetrics.
 
@@ -112,7 +112,7 @@ The full endpoint includes the inventory-derived monitoring-server address and p
 
 ## 9. Grafana
 
-Grafana is the visualization layer. The server role provisions a VictoriaMetrics datasource and a simple Mac Mini dashboard. Grafana queries VictoriaMetrics and displays CPU, memory, filesystem, and network data by host.
+Grafana is the visualization layer. The server role provisions a VictoriaMetrics datasource and two dashboards. **Mac Mini Fleet Overview** shows every host on shared panels (CPU, memory, disk, network, load, latency to the monitoring Mac) with a **Mac Mini** selector to narrow them. Clicking a host's series or its name in the Hosts table opens **Mac Mini Detail**, one reusable dashboard that takes the host as a variable.
 
 Grafana's configuration is rendered under `/opt/observability/etc/grafana`, its application is under `/opt/observability/grafana`, and its service listens on port `3000` by default.
 
@@ -166,8 +166,9 @@ No new role is needed for more Macs. Inventory membership determines where `obse
 - `com.observability.victoriametrics`
 - `com.observability.grafana`
 - `com.observability.otelcol`
+- `com.observability.sshstate` (runs every `otel_ssh_check_interval` seconds via `StartInterval`)
 
-All three are rendered from a single shared template, `roles/observability_common/templates/launchd_daemon.plist.j2`. Each calling role supplies the label, the `ProgramArguments` list (kept in that role's `defaults/main.yml`) and the log paths, so the three plists cannot drift apart. `ansible.builtin.service` has no macOS implementation, so the roles drive `launchctl` directly (bootstrap-if-not-loaded on install, bootout+bootstrap on restart) via shared task files in `observability_common`. This has not yet been confirmed working end to end on a real Mac Mini; use [LAUNCHD_TROUBLESHOOTING.md](../LAUNCHD_TROUBLESHOOTING.md) for diagnostic commands and manual recovery.
+All four are rendered from a single shared template, `roles/observability_common/templates/launchd_daemon.plist.j2`. Each calling role supplies the label, the `ProgramArguments` list (kept in that role's `defaults/main.yml`) and the log paths, so the plists cannot drift apart. `ansible.builtin.service` has no macOS implementation, so the roles drive `launchctl` directly (bootstrap-if-not-loaded on install, bootout+bootstrap on restart) via shared task files in `observability_common`. This has not yet been confirmed working end to end on a real Mac Mini; use [LAUNCHD_TROUBLESHOOTING.md](../LAUNCHD_TROUBLESHOOTING.md) for diagnostic commands and manual recovery.
 
 ## 14. Variables and dynamic configuration
 

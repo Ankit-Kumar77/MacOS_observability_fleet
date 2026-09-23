@@ -50,12 +50,12 @@ Most of this project can be verified locally on any Apple Silicon Mac, and it is
 | Group | Role | Installs |
 | --- | --- | --- |
 | `monitoring_server` (exactly one host) | `observability_server` | VictoriaMetrics, Grafana, datasource + dashboard provisioning, 2 LaunchDaemons |
-| `monitored_nodes` (N hosts) | `observability_agent` | `otelcol-contrib`, host-metric pipeline, 1 LaunchDaemon |
+| `monitored_nodes` (N hosts) | `observability_agent` | `otelcol-contrib`, host-metric pipeline, SSH state script, 2 LaunchDaemons |
 
 Metric path — deliberately **no Prometheus server and no node_exporter**:
 
 ```
-hostmetrics -> resourcedetection -> batch -> otlphttp (basic auth)
+hostmetrics + tcp_check + otlp_json_file(SSH state) -> resourcedetection -> batch -> otlphttp (basic auth)
   -> http://<monitoring_server_address>:8428/opentelemetry/v1/metrics  (VictoriaMetrics)
   -> Grafana (datasource type `prometheus`, uid `victoriametrics`, localhost:8428)
 ```
@@ -70,7 +70,7 @@ A third role, `observability_common`, holds what both roles share. It has no `ta
 | `tasks/install_versioned_archive.yml` | Download → checksum-verify → versioned extract → stat → assert → clean up the temp archive. Used once per component. |
 | `tasks/launchd_ensure_started.yml` | `launchctl print` → `bootstrap` if not loaded. Included from each role's install task. |
 | `tasks/launchd_restart.yml` | `launchctl bootout` → `bootstrap`. Included from each role's restart handler. |
-| `templates/launchd_daemon.plist.j2` | One plist for all three daemons, parameterised by `launchd_label`, `launchd_program_arguments`, the log paths, and an optional `launchd_working_directory`. |
+| `templates/launchd_daemon.plist.j2` | One plist for all four daemons, parameterised by `launchd_label`, `launchd_program_arguments`, the log paths, an optional `launchd_working_directory`, and an optional `launchd_start_interval` (periodic job: `StartInterval` instead of `KeepAlive`). |
 
 Three rules keep this safe, and all three are load-bearing:
 
@@ -80,7 +80,7 @@ Three rules keep this safe, and all three are load-bearing:
 
 `ProgramArguments` for each daemon are lists in that role's `defaults/main.yml`, so they are documented and overridable rather than buried in XML. VictoriaMetrics builds its list as `victoriametrics_base_arguments + (victoriametrics_auth_arguments if victoriametrics_auth_enabled else [])`.
 
-Everything lands under `/opt/observability`, owned `root:wheel`. LaunchDaemon labels: `com.observability.victoriametrics`, `com.observability.grafana`, `com.observability.otelcol`.
+Everything lands under `/opt/observability`, owned `root:wheel`. LaunchDaemon labels: `com.observability.victoriametrics`, `com.observability.grafana`, `com.observability.otelcol`, `com.observability.sshstate` (periodic).
 
 ### Variable layout
 
@@ -111,7 +111,13 @@ These are the things that make this project different from the same stack on Lin
 
 - **VictoriaMetrics needs `-opentelemetry.usePrometheusNaming`.** Without it, OTLP names are stored verbatim including dots (`system.memory.usage`, label `host.name`) and every dashboard query silently returns zero series. This flag is load-bearing, not cosmetic.
 - **PromQL: never divide a full-label selector by a `sum by (...)`.** The label sets do not match and the result is empty even though both operands have data. Aggregate both sides: `sum by (host_name)(x{state="used"}) / sum by (host_name)(x)`. Two panels shipped broken this way.
-- **`dashboard.json.j2` is Jinja-rendered**, so Grafana's `{{host_name}}` legend syntax must be escaped as `{{ '{{' }}host_name{{ '}}' }}`. Panels reference the datasource by uid `victoriametrics` and each target needs a `refId`.
+- **`dashboard.json.j2` (fleet) and `dashboard_detail.json.j2` (per-host) are Jinja-rendered**, so Grafana's `{{host_name}}` legend syntax must be escaped as `{{ '{{' }}host_name{{ '}}' }}`. Grafana `${...}` variables do not collide and are written as-is. Panels reference the datasource by uid `victoriametrics` and each target needs a `refId`. Both dashboards define a `host_name` variable from `label_values(system_memory_usage_bytes, host_name)`: multi-value with All = `.*` on the fleet dashboard (every query filters `host_name=~"$host_name"`), single-value on the detail dashboard (`host_name="$host_name"`). They link to each other by `grafana_fleet_dashboard_uid` / `grafana_detail_dashboard_uid`; fleet series and Hosts-table links pass `?var-host_name=<host>`.
+- **Latency is `tcp_check`, not `hostmetrics`.** `tcp_check/monitoring_server` (Alpha in 0.159.0; component types there are underscored, `tcp_check` not `tcpcheck`) times a TCP connect to `monitoring_server_address:victoriametrics_port` and yields `tcpcheck_duration_milliseconds` (whole ms, one sample per interval, so no percentiles) and `tcpcheck_status_ratio`. Gated by `otel_latency_check_enabled`.
+- **SSH state comes from a script, not a collector component.** 0.159.0 has no exec-style receiver, and `ssh_check` needs SSH credentials. So `com.observability.sshstate` runs `templates/ssh_state.sh.j2` as root on a `StartInterval`, and `otlp_json_file/ssh_state` reads its snapshot into the normal pipeline. The script depends on three things:
+  - **The file format.** The snapshot must be **one line** (the receiver is line-based) and replaced atomically (`mv`), with the collection timestamp inside the first 1000 bytes (the receiver's fingerprint). That timestamp makes each snapshot a new file, read exactly once.
+  - **How macOS runs sshd.** sshd is socket-activated by launchd, which holds port 22 open even when sshd is broken. So `ssh_service_up` means "answered with an `SSH-2.0-` banner on loopback"; `ssh_port_listening` (netstat) and `ssh_remote_login_enabled` (`launchctl print system/com.openssh.sshd`) are separate signals.
+  - **How a session is identified.** A session is a process titled `sshd[-session]: <user>@<tty|notty>` that also holds an established socket on the SSH port. On OpenSSH 10.3 / macOS 26 this was verified against real sessions: the `[priv]` monitors are excluded. Root is needed to see other users' process titles and sockets.
+- **Per-session data is one info-style series per live session** (`ssh_session_start_time_seconds{user_name, source_address, ssh_session_tty, ssh_session_id}`, value = login time). Cardinality is bounded by real SSH usage, and the project has no log backend to hold it instead. Instant queries keep returning a series for the lookback window after it stops, so session tables filter to series whose `timestamp()` equals the host's latest `ssh_sessions` sample (`live_sessions` in both dashboard templates). Without that filter, ended sessions linger for minutes. `otel_ssh_session_details_enabled: false` drops the per-session series and keeps the counts.
 - **Releases install into versioned directories behind stable symlinks** (`bin/victoria-metrics-<ver>/`, `grafana-<ver>/`, `bin/otelcol-contrib-<ver>/`), with the stable path repointed by the role. The symlink flip — not the extraction — notifies the restart handler. Archives are version-stamped in `/tmp` and removed after extraction. A `creates:` guard on an unversioned path silently turns a version bump into a no-op. Adding a component means calling `install_versioned_archive` and then writing its symlink + plist + service tasks — do not re-implement the install flow.
 - **`install_versioned_archive.yml` checks the versioned binary path before doing anything else, and skips download/extract/cleanup entirely when it already exists.** Without this, a re-run after any later task in the same play fails (a common case while iterating on a real Mac) always re-downloads — the temp archive is deleted on success, so `get_url`'s own checksum-match skip has nothing to compare against even though the binary is already installed. This has no version-bump footgun since the checked path is the versioned one, not the stable symlink.
 - **`{{ grafana_home }}` must not be created as a directory.** It is a symlink, and `ansible.builtin.file` refuses to replace a real directory with one. It is deliberately excluded from the `prerequisites.yml` directory loop; `{{ var_dir }}/grafana` (Grafana's data dir) is a real directory and stays.

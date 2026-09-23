@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 {#-
-  Shared LaunchDaemon plist for all three observability services.
+  Shared LaunchDaemon plist for all observability services.
 
   Rendered from the calling role, which owns the notify/handler pairing:
 
@@ -17,6 +17,9 @@
   Required: launchd_label, launchd_program_arguments (list),
             launchd_stdout_log, launchd_stderr_log.
   Optional: launchd_working_directory.
+            launchd_start_interval (seconds): run the program periodically
+            instead of keeping it alive, for short-lived jobs such as
+            com.observability.sshstate.
 
   Values are XML-escaped; program arguments are operator-supplied and may
   legitimately contain characters that are significant in XML.
@@ -38,8 +41,13 @@
     </array>
     <key>RunAtLoad</key>
     <true/>
+{% if launchd_start_interval | default('') %}
+    <key>StartInterval</key>
+    <integer>{{ launchd_start_interval | int }}</integer>
+{% else %}
     <key>KeepAlive</key>
     <true/>
+{% endif %}
     <key>StandardErrorPath</key>
     <string>{{ launchd_stderr_log | e }}</string>
     <key>StandardOutPath</key>

@@ -14,7 +14,7 @@ Ansible installs host-metric observability across a fleet of Mac Minis. One Mac 
 | Machine | Role applied | Software installed |
 | --- | --- | --- |
 | Monitoring Mac (exactly one) | `observability_server` | VictoriaMetrics, Grafana, provisioned datasource and dashboard, 2 LaunchDaemons |
-| Monitored Mac (N of them) | `observability_agent` | OpenTelemetry Collector Contrib, host-metric pipeline, 1 LaunchDaemon |
+| Monitored Mac (N of them) | `observability_agent` | OpenTelemetry Collector Contrib, host-metric pipeline, SSH state script, 2 LaunchDaemons |
 
 There is deliberately **no Prometheus server and no node_exporter**. Metrics travel over OTLP/HTTP straight into VictoriaMetrics.
 
@@ -219,8 +219,9 @@ Then open `http://<monitoring-mac>:3000` in a browser, sign in as `admin`, and c
 
 - A datasource named **VictoriaMetrics** is present.
 - A dashboard with uid `mac-mini-fleet`, titled **Mac Mini Fleet Overview**, is present.
+- A dashboard with uid `mac-mini-detail`, titled **Mac Mini Detail**, is present.
 
-Its six panels are Active Hosts, CPU Usage, Memory Usage, Disk Usage, Network Traffic, and Load Average. They will be empty until at least one agent is deployed.
+The fleet dashboard's panels are Active Hosts, Monitoring Server Unreachable, CPU Usage, Memory Usage, Disk Usage, Network Traffic, Load Average, Latency to Monitoring Server, a Hosts table, SSH Access, and Current SSH Sessions. The **Mac Mini** selector at the top filters them; clicking a host's series or its name in the Hosts table opens Mac Mini Detail for that host. Everything will be empty until at least one agent is deployed.
 
 Logs live in `/opt/observability/var/log/victoriametrics.err.log` and `grafana.err.log`.
 
@@ -256,7 +257,7 @@ curl -s 'http://<monitoring-mac>:8428/api/v1/label/host_name/values'
 
 The collector reports the **OS hostname**, which may carry a `.local` suffix and need not match the inventory alias. Confirm the Mac appears in that list rather than expecting an exact string match.
 
-Finally, open the Grafana dashboard and confirm all six panels return data for the new host. Allow one or two 15-second collection intervals after the collector restarts.
+Finally, open the Grafana fleet dashboard and confirm every panel returns data for the new host, and that clicking its name in the Hosts table opens Mac Mini Detail for it. Allow one or two 15-second collection intervals after the collector restarts.
 
 ### Step 9 — Roll out to the fleet
 
@@ -307,8 +308,9 @@ Everything is under `/opt/observability`, owned `root:wheel`.
 | `/opt/observability/bin/` | Stable symlinks plus versioned install directories |
 | `/opt/observability/etc/` | `otel-config.yaml` (agents), `grafana/grafana.ini` and provisioning (server) |
 | `/opt/observability/var/` | VictoriaMetrics storage, Grafana data and plugins |
-| `/opt/observability/var/log/` | `victoriametrics.*.log`, `grafana.*.log`, `otelcol.*.log` |
-| `/Library/LaunchDaemons/` | `com.observability.victoriametrics.plist`, `com.observability.grafana.plist`, `com.observability.otelcol.plist` |
+| `/opt/observability/var/ssh-state/` | Agents: the SSH state snapshot (`0700` directory, `0600` file) |
+| `/opt/observability/var/log/` | `victoriametrics.*.log`, `grafana.*.log`, `otelcol.*.log`, `sshstate.*.log` |
+| `/Library/LaunchDaemons/` | `com.observability.victoriametrics.plist`, `com.observability.grafana.plist`, `com.observability.otelcol.plist`, `com.observability.sshstate.plist` |
 
 Files carrying credentials are mode `0600` and marked `no_log`: `grafana.ini`, `otel-config.yaml`, the provisioned datasource, and the VictoriaMetrics password file. The VictoriaMetrics password is passed to launchd as `file://...` rather than inline, so it stays out of the world-readable plist and out of `ps` output.
 
@@ -319,8 +321,9 @@ Files carrying credentials are mode `0600` and marked `no_log`: `grafana.ini`, `
 | `com.observability.victoriametrics` | `bin/victoria-metrics-prod` with storage path, port, 90-day retention, and `-opentelemetry.usePrometheusNaming` |
 | `com.observability.grafana` | `grafana server --config=... --homepath=...` |
 | `com.observability.otelcol` | `bin/otelcol-contrib --config=/opt/observability/etc/otel-config.yaml` |
+| `com.observability.sshstate` | `bin/observability-ssh-state` every 30 s (`StartInterval`) |
 
-All three plists set `RunAtLoad` and `KeepAlive`, so a bootstrapped daemon starts immediately and survives reboots without a separate enable step.
+All plists set `RunAtLoad`, so a bootstrapped daemon starts immediately and survives reboots without a separate enable step. The three long-running services also set `KeepAlive`, while `com.observability.sshstate` uses `StartInterval`.
 
 Service lifecycle is driven by `launchctl` directly, not by `ansible.builtin.service`, because that module has **no macOS implementation at all** and fails with `get_service_tools not implemented on target platform`.
 
@@ -391,7 +394,8 @@ Read this before treating the stack as production-ready.
 
 **Not yet verified on physical Mac Minis.**
 
-- launchd bootstrap, `KeepAlive`, and restart behaviour for all three services.
+- launchd bootstrap, `KeepAlive`/`StartInterval`, and restart behaviour for all four services.
+- SSH state against the system sshd with Remote Login on. The script was run on macOS 26 against a private loopback sshd with real sessions, but not against `com.openssh.sshd` itself.
 - Running as root under launchd rather than as a logged-in user.
 - `root:wheel` ownership and the `0600` secret files at runtime.
 - Network and firewall policy between monitored Macs and the monitoring Mac.

@@ -8,7 +8,11 @@ Ansible automation for host-metric observability on Apple Silicon Mac Minis. One
 
 The metric path is:
 
-`hostmetrics -> resourcedetection -> batch -> otlphttp -> VictoriaMetrics -> Grafana`
+`hostmetrics + tcp_check + SSH state -> resourcedetection -> batch -> otlphttp -> VictoriaMetrics -> Grafana`
+
+`tcp_check` measures TCP connect latency from each Mac to VictoriaMetrics on the monitoring Mac. Grafana provisions two dashboards: **Mac Mini Fleet Overview** (all hosts, with a **Mac Mini** selector) and **Mac Mini Detail** (one reusable per-host dashboard, opened by clicking a host on the fleet dashboard).
+
+SSH access state is collected by a root LaunchDaemon, `com.observability.sshstate`, that runs every 30 s. It records whether Remote Login is on, whether port 22 is listening, whether sshd actually answers, and each live SSH session's user, source address, terminal and login time. Nothing from inside a session is recorded. The collector reads it through its `otlp_json_file` receiver. Both dashboards have SSH panels.
 
 Each collector sends OTLP/HTTP to `http://<monitoring-server-address>:8428/opentelemetry/v1/metrics`. There is no Prometheus server or Prometheus-specific Collector component in this design.
 
@@ -169,7 +173,8 @@ in its flag list. Re-verify the dashboard panels after deploying with it.
 
 What that does **not** cover, and still requires physical Mac Minis:
 
-- launchd bootstrap, `KeepAlive` and restart behaviour for all three services.
+- launchd bootstrap, `KeepAlive`/`StartInterval` and restart behaviour for all four services.
+- SSH state against the system sshd with Remote Login on. The script was run on macOS 26 against a private loopback sshd with real sessions, but not against `com.openssh.sshd` itself.
 - Running as root under launchd rather than as a logged-in user.
 - File ownership (`root:wheel`) and the `0600` secret files at runtime.
 - Network and firewall policy between monitored Macs and the monitoring Mac.

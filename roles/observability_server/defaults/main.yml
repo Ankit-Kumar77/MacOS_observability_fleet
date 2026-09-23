@@ -26,6 +26,10 @@ grafana_home: "{{ base_dir }}/grafana"
 grafana_port: 3000
 # Matches the agent collection interval so Grafana picks a sensible step.
 grafana_time_interval: "15s"
+# Provisioned dashboard uids. The fleet dashboard links to the host detail
+# dashboard (and back) by uid, so both templates read them from here.
+grafana_fleet_dashboard_uid: mac-mini-fleet
+grafana_detail_dashboard_uid: mac-mini-detail
 
 # Grafana takes noticeably longer than VictoriaMetrics on first boot (sqlite
 # init plus provisioning), so it gets a longer readiness budget.

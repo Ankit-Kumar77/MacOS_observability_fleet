@@ -67,6 +67,16 @@
     mode: '0644'
   notify: Restart Grafana
 
+# One reusable per-host dashboard; the fleet dashboard links to it by uid.
+- name: Provision Mac Mini detail dashboard
+  ansible.builtin.template:
+    src: dashboard_detail.json.j2
+    dest: "{{ etc_dir }}/grafana/provisioning/dashboards/mac_mini_detail.json"
+    owner: root
+    group: wheel
+    mode: '0644'
+  notify: Restart Grafana
+
 - name: Generate Grafana launchd plist
   ansible.builtin.template:
     src: "{{ role_path }}/../observability_common/templates/launchd_daemon.plist.j2"

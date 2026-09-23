@@ -1,8 +1,19 @@
 {#- Managed by Ansible. Grafana legend syntax {{host_name}} collides with
-    Jinja delimiters, so it is escaped as {{ '{{' }}host_name{{ '}}' }}. -#}
+    Jinja delimiters, so it is escaped as {{ '{{' }}host_name{{ '}}' }}.
+    Grafana ${...} variables do not collide and are written as-is.
+    Every query filters on host_name=~"$host_name"; the variable is multi-value
+    with an All value of .*, so "All" keeps the fleet-wide view. -#}
 {% set ds = {"type": "prometheus", "uid": "victoriametrics"} %}
+{% set detail_url = "/d/" ~ grafana_detail_dashboard_uid %}
+{% set host_links = [{"title": "Open ${__value.raw} in Mac Mini Detail", "url": detail_url ~ "?var-host_name=${__value.raw:percentencode}&${__url_time_range}"}] %}
+{#- A session series lingers in instant queries for the lookback window after
+    the session ends. Every series in one snapshot shares one timestamp, so a
+    session is current only if its latest sample is as new as its host's
+    latest ssh_sessions sample. -#}
+{% set live_sessions = 'ssh_session_start_time_seconds{host_name=~\\"$host_name\\"} and on (host_name, ssh_session_id) (timestamp(ssh_session_start_time_seconds{host_name=~\\"$host_name\\"}) >= on (host_name) group_left () timestamp(ssh_sessions{host_name=~\\"$host_name\\"}))' %}
+{% set series_links = [{"title": "Open ${__field.labels.host_name} in Mac Mini Detail", "url": detail_url ~ "?var-host_name=${__field.labels.host_name:percentencode}&${__url_time_range}"}] %}
 {
-  "uid": "mac-mini-fleet",
+  "uid": "{{ grafana_fleet_dashboard_uid }}",
   "title": "Mac Mini Fleet Overview",
   "tags": ["macos", "otel", "hostmetrics"],
   "timezone": "browser",
@@ -10,6 +21,42 @@
   "version": 1,
   "refresh": "30s",
   "time": {"from": "now-6h", "to": "now"},
+  "links": [
+    {
+      "type": "link",
+      "title": "Mac Mini Detail",
+      "tooltip": "Per-host detail, opened on the first host. To open a specific Mac, click its series or its name in the Hosts table.",
+      "icon": "dashboard",
+      "url": "{{ detail_url }}",
+      "includeVars": false,
+      "keepTime": true,
+      "targetBlank": false,
+      "asDropdown": false,
+      "tags": []
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "host_name",
+        "label": "Mac Mini",
+        "description": "Hosts are discovered from the host_name label, so new Macs appear without editing the dashboard.",
+        "type": "query",
+        "datasource": {{ ds | tojson }},
+        "definition": "label_values(system_memory_usage_bytes, host_name)",
+        "query": {"qryType": 1, "query": "label_values(system_memory_usage_bytes, host_name)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {"selected": true, "text": ["All"], "value": ["$__all"]},
+        "options": [],
+        "hide": 0
+      }
+    ]
+  },
   "panels": [
     {
       "id": 1,
@@ -23,7 +70,7 @@
         {
           "refId": "A",
           "datasource": {{ ds | tojson }},
-          "expr": "count(count by (host_name) (system_memory_usage_bytes))",
+          "expr": "count(count by (host_name) (system_memory_usage_bytes{host_name=~\"$host_name\"}))",
           "legendFormat": "hosts",
           "instant": true
         }
@@ -33,15 +80,15 @@
       "id": 2,
       "type": "timeseries",
       "title": "CPU Usage (%)",
-      "description": "Busy CPU time as a share of total CPU time. macOS reports no per-core `cpu` label, so this normalises against the sum of all states rather than averaging.",
+      "description": "Busy CPU time as a share of total CPU time. macOS reports no per-core `cpu` label, so this normalises against the sum of all states rather than averaging. Click a series to open that Mac in the detail dashboard.",
       "datasource": {{ ds | tojson }},
       "gridPos": {"x": 4, "y": 0, "w": 10, "h": 8},
-      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100}, "overrides": []},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "links": {{ series_links | tojson }}}, "overrides": []},
       "targets": [
         {
           "refId": "A",
           "datasource": {{ ds | tojson }},
-          "expr": "100 * (1 - sum by (host_name) (rate(system_cpu_time_seconds_total{state=\"idle\"}[5m])) / sum by (host_name) (rate(system_cpu_time_seconds_total[5m])))",
+          "expr": "100 * (1 - sum by (host_name) (rate(system_cpu_time_seconds_total{state=\"idle\", host_name=~\"$host_name\"}[5m])) / sum by (host_name) (rate(system_cpu_time_seconds_total{host_name=~\"$host_name\"}[5m])))",
           "legendFormat": "{{ '{{' }}host_name{{ '}}' }}"
         }
       ]
@@ -53,13 +100,38 @@
       "description": "macOS memory states are free / inactive / used; inactive is reclaimable and is not counted as used.",
       "datasource": {{ ds | tojson }},
       "gridPos": {"x": 14, "y": 0, "w": 10, "h": 8},
-      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100}, "overrides": []},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "links": {{ series_links | tojson }}}, "overrides": []},
       "targets": [
         {
           "refId": "A",
           "datasource": {{ ds | tojson }},
-          "expr": "sum by (host_name) (system_memory_usage_bytes{state=\"used\"}) / sum by (host_name) (system_memory_usage_bytes) * 100",
+          "expr": "sum by (host_name) (system_memory_usage_bytes{state=\"used\", host_name=~\"$host_name\"}) / sum by (host_name) (system_memory_usage_bytes{host_name=~\"$host_name\"}) * 100",
           "legendFormat": "{{ '{{' }}host_name{{ '}}' }}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Monitoring Server Unreachable",
+      "description": "Hosts whose latest TCP check to VictoriaMetrics failed. A Mac that cannot reach the server at all stops reporting; compare Active Hosts against the fleet size for that case.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 0, "y": 4, "w": 4, "h": 4},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "count(tcpcheck_status_ratio{host_name=~\"$host_name\"} == 0) or vector(0)",
+          "legendFormat": "hosts",
+          "instant": true
         }
       ]
     },
@@ -70,12 +142,12 @@
       "description": "Root APFS volume. Sibling volumes in the same container report identical capacity, so only \"/\" is charted.",
       "datasource": {{ ds | tojson }},
       "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
-      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100}, "overrides": []},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "links": {{ series_links | tojson }}}, "overrides": []},
       "targets": [
         {
           "refId": "A",
           "datasource": {{ ds | tojson }},
-          "expr": "sum by (host_name) (system_filesystem_usage_bytes{state=\"used\", mountpoint=\"/\"}) / sum by (host_name) (system_filesystem_usage_bytes{mountpoint=\"/\"}) * 100",
+          "expr": "sum by (host_name) (system_filesystem_usage_bytes{state=\"used\", mountpoint=\"/\", host_name=~\"$host_name\"}) / sum by (host_name) (system_filesystem_usage_bytes{mountpoint=\"/\", host_name=~\"$host_name\"}) * 100",
           "legendFormat": "{{ '{{' }}host_name{{ '}}' }}"
         }
       ]
@@ -87,18 +159,18 @@
       "description": "Summed across interfaces; without the sum each host contributes one series per interface.",
       "datasource": {{ ds | tojson }},
       "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
-      "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []},
+      "fieldConfig": {"defaults": {"unit": "Bps", "links": {{ series_links | tojson }}}, "overrides": []},
       "targets": [
         {
           "refId": "A",
           "datasource": {{ ds | tojson }},
-          "expr": "sum by (host_name) (rate(system_network_io_bytes_total{direction=\"receive\"}[5m]))",
+          "expr": "sum by (host_name) (rate(system_network_io_bytes_total{direction=\"receive\", host_name=~\"$host_name\"}[5m]))",
           "legendFormat": "{{ '{{' }}host_name{{ '}}' }} (Receive)"
         },
         {
           "refId": "B",
           "datasource": {{ ds | tojson }},
-          "expr": "sum by (host_name) (rate(system_network_io_bytes_total{direction=\"transmit\"}[5m]))",
+          "expr": "sum by (host_name) (rate(system_network_io_bytes_total{direction=\"transmit\", host_name=~\"$host_name\"}[5m]))",
           "legendFormat": "{{ '{{' }}host_name{{ '}}' }} (Transmit)"
         }
       ]
@@ -110,14 +182,191 @@
       "description": "Available on macOS from the hostmetrics load scraper.",
       "datasource": {{ ds | tojson }},
       "gridPos": {"x": 0, "y": 16, "w": 12, "h": 8},
-      "fieldConfig": {"defaults": {"unit": "none", "min": 0}, "overrides": []},
+      "fieldConfig": {"defaults": {"unit": "none", "min": 0, "links": {{ series_links | tojson }}}, "overrides": []},
       "targets": [
         {
           "refId": "A",
           "datasource": {{ ds | tojson }},
-          "expr": "system_cpu_load_average_1m",
+          "expr": "system_cpu_load_average_1m{host_name=~\"$host_name\"}",
           "legendFormat": "{{ '{{' }}host_name{{ '}}' }}"
         }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Latency to Monitoring Server (ms)",
+      "description": "TCP connect time from each Mac to VictoriaMetrics on the monitoring Mac, measured by the collector's tcp_check receiver every collection interval. One sample per interval in whole milliseconds; this is a round-trip time, not a percentile.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 12, "y": 16, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "ms", "min": 0, "links": {{ series_links | tojson }}}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "max by (host_name) (tcpcheck_duration_milliseconds{host_name=~\"$host_name\"})",
+          "legendFormat": "{{ '{{' }}host_name{{ '}}' }}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Hosts",
+      "description": "Current values per Mac. Click a host name to open it in the Mac Mini Detail dashboard.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 0, "y": 24, "w": 24, "h": 10},
+      "options": {"showHeader": true, "cellHeight": "sm", "sortBy": [{"displayName": "Mac Mini", "desc": false}]},
+      "fieldConfig": {
+        "defaults": {"decimals": 1},
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "host_name"},
+            "properties": [
+              {"id": "displayName", "value": "Mac Mini"},
+              {"id": "links", "value": [{"title": "Open ${__value.raw} in Mac Mini Detail", "url": "{{ detail_url }}?var-host_name=${__value.raw:percentencode}&${__url_time_range}"}]}
+            ]
+          },
+          {"matcher": {"id": "byName", "options": "Value #A"}, "properties": [{"id": "displayName", "value": "CPU"}, {"id": "unit", "value": "percent"}]},
+          {"matcher": {"id": "byName", "options": "Value #B"}, "properties": [{"id": "displayName", "value": "Memory"}, {"id": "unit", "value": "percent"}]},
+          {"matcher": {"id": "byName", "options": "Value #C"}, "properties": [{"id": "displayName", "value": "Disk (/)"}, {"id": "unit", "value": "percent"}]},
+          {"matcher": {"id": "byName", "options": "Value #D"}, "properties": [{"id": "displayName", "value": "Load (1m)"}, {"id": "unit", "value": "none"}, {"id": "decimals", "value": 2}]},
+          {"matcher": {"id": "byName", "options": "Value #E"}, "properties": [{"id": "displayName", "value": "Latency"}, {"id": "unit", "value": "ms"}, {"id": "decimals", "value": 0}]}
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "100 * (1 - sum by (host_name) (rate(system_cpu_time_seconds_total{state=\"idle\", host_name=~\"$host_name\"}[5m])) / sum by (host_name) (rate(system_cpu_time_seconds_total{host_name=~\"$host_name\"}[5m])))",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "datasource": {{ ds | tojson }},
+          "expr": "sum by (host_name) (system_memory_usage_bytes{state=\"used\", host_name=~\"$host_name\"}) / sum by (host_name) (system_memory_usage_bytes{host_name=~\"$host_name\"}) * 100",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "C",
+          "datasource": {{ ds | tojson }},
+          "expr": "sum by (host_name) (system_filesystem_usage_bytes{state=\"used\", mountpoint=\"/\", host_name=~\"$host_name\"}) / sum by (host_name) (system_filesystem_usage_bytes{mountpoint=\"/\", host_name=~\"$host_name\"}) * 100",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "D",
+          "datasource": {{ ds | tojson }},
+          "expr": "max by (host_name) (system_cpu_load_average_1m{host_name=~\"$host_name\"})",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "E",
+          "datasource": {{ ds | tojson }},
+          "expr": "max by (host_name) (tcpcheck_duration_milliseconds{host_name=~\"$host_name\"})",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {"id": "merge", "options": {}},
+        {"id": "organize", "options": {"excludeByName": {"Time": true}, "indexByName": {"host_name": 0, "Value #A": 1, "Value #B": 2, "Value #C": 3, "Value #D": 4, "Value #E": 5}}}
+      ]
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "SSH Access",
+      "description": "Per Mac: Remote Login is the launchd sshd job being loaded; SSH Service is sshd answering with an SSH protocol banner on loopback (launchd holds port 22 open even when sshd itself is broken, so an open port alone is not proof); Sessions counts authenticated SSH connections. Refreshed every otel_ssh_check_interval by com.observability.sshstate.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 0, "y": 34, "w": 24, "h": 8},
+      "options": {"showHeader": true, "cellHeight": "sm", "sortBy": [{"displayName": "Mac Mini", "desc": false}]},
+      "fieldConfig": {
+        "defaults": {"custom": {"align": "auto"}},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "host_name"}, "properties": [{"id": "displayName", "value": "Mac Mini"}, {"id": "links", "value": {{ host_links | tojson }}}]},
+          {"matcher": {"id": "byName", "options": "Value #A"}, "properties": [{"id": "displayName", "value": "Remote Login"}, {"id": "custom.cellOptions", "value": {"type": "color-text"}}, {"id": "mappings", "value": [{"type": "value", "options": {"0": {"text": "Off", "color": "orange"}, "1": {"text": "On", "color": "green"}}}]}]},
+          {"matcher": {"id": "byName", "options": "Value #B"}, "properties": [{"id": "displayName", "value": "SSH Service"}, {"id": "custom.cellOptions", "value": {"type": "color-background"}}, {"id": "mappings", "value": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}]},
+          {"matcher": {"id": "byName", "options": "Value #C"}, "properties": [{"id": "displayName", "value": "Port"}, {"id": "custom.cellOptions", "value": {"type": "color-text"}}, {"id": "mappings", "value": [{"type": "value", "options": {"0": {"text": "Closed", "color": "red"}, "1": {"text": "Listening", "color": "green"}}}]}]},
+          {"matcher": {"id": "byName", "options": "Value #D"}, "properties": [{"id": "displayName", "value": "Sessions"}, {"id": "unit", "value": "none"}, {"id": "decimals", "value": 0}]}
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "max by (host_name) (ssh_remote_login_enabled{host_name=~\"$host_name\"})",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "datasource": {{ ds | tojson }},
+          "expr": "max by (host_name) (ssh_service_up{host_name=~\"$host_name\"})",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "C",
+          "datasource": {{ ds | tojson }},
+          "expr": "max by (host_name) (ssh_port_listening{host_name=~\"$host_name\"})",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "D",
+          "datasource": {{ ds | tojson }},
+          "expr": "max by (host_name) (ssh_sessions{host_name=~\"$host_name\"})",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {"id": "merge", "options": {}},
+        {"id": "organize", "options": {"excludeByName": {"Time": true}, "indexByName": {"host_name": 0, "Value #B": 1, "Value #C": 2, "Value #D": 3, "Value #A": 4}}}
+      ]
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "Current SSH Sessions",
+      "description": "Live authenticated SSH sessions: user, source address, terminal (notty = scp, sftp or a remote command) and login time. Only the fields shown are collected; nothing from inside the session is recorded.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 0, "y": 42, "w": 24, "h": 8},
+      "options": {"showHeader": true, "cellHeight": "sm", "sortBy": [{"displayName": "Mac Mini", "desc": false}]},
+      "fieldConfig": {
+        "defaults": {"custom": {"align": "auto"}},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "host_name"}, "properties": [{"id": "displayName", "value": "Mac Mini"}, {"id": "links", "value": {{ host_links | tojson }}}]},
+          {"matcher": {"id": "byName", "options": "user_name"}, "properties": [{"id": "displayName", "value": "User"}]},
+          {"matcher": {"id": "byName", "options": "source_address"}, "properties": [{"id": "displayName", "value": "Source"}]},
+          {"matcher": {"id": "byName", "options": "ssh_session_tty"}, "properties": [{"id": "displayName", "value": "Terminal"}]},
+          {"matcher": {"id": "byName", "options": "Value #A"}, "properties": [{"id": "displayName", "value": "Logged in"}, {"id": "unit", "value": "dateTimeAsLocal"}]},
+          {"matcher": {"id": "byName", "options": "Value #B"}, "properties": [{"id": "displayName", "value": "Duration"}, {"id": "unit", "value": "dtdurations"}]}
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "({{ live_sessions }}) * 1000",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "datasource": {{ ds | tojson }},
+          "expr": "time() - ({{ live_sessions }})",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {"id": "merge", "options": {}},
+        {"id": "organize", "options": {"excludeByName": {"Time": true, "os_type": true, "ssh_session_id": true}, "indexByName": {"host_name": 0, "user_name": 1, "source_address": 2, "ssh_session_tty": 3, "Value #A": 4, "Value #B": 5}}}
       ]
     }
   ]

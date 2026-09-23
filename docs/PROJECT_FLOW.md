@@ -60,9 +60,9 @@ The `observability_server` role imports tasks in this order:
 
 1. `prerequisites.yml` creates `/opt/observability` directories for binaries, configuration, data, plugins, and logs.
 2. `victoriametrics.yml` writes the `0600` basic-auth password file, downloads and checksum-verifies the archive, extracts it into a versioned directory, repoints the `victoria-metrics-prod` symlink, renders its plist, and requests service start.
-3. `grafana.yml` extracts Grafana into a versioned directory, repoints the `/opt/observability/grafana` symlink, renders `grafana.ini`, provisions the VictoriaMetrics datasource and dashboard, renders its plist, and requests service start.
+3. `grafana.yml` extracts Grafana into a versioned directory, repoints the `/opt/observability/grafana` symlink, renders `grafana.ini`, provisions the VictoriaMetrics datasource and the fleet and detail dashboards, renders its plist, and requests service start.
 4. `flush_handlers` applies any pending restarts **before** verification, so the checks below see the configuration this run just produced rather than the previous one.
-5. `verify.yml` checks VictoriaMetrics health, that its query API accepts the configured credentials and rejects unauthenticated access, Grafana health, the Grafana datasource API, and that the fleet dashboard was provisioned.
+5. `verify.yml` checks VictoriaMetrics health, that its query API accepts the configured credentials and rejects unauthenticated access, Grafana health, the Grafana datasource API, and that the fleet and detail dashboards were provisioned.
 
 The VictoriaMetrics plist points to `/opt/observability/bin/victoria-metrics-prod`, stores data in `/opt/observability/var/victoriametrics`, logs under `/opt/observability/var/log`, and listens on the shared port variable (default `8428`). Grafana's plist runs `/opt/observability/grafana/bin/grafana server` (Grafana 11+ removed the separate `grafana-server` binary); its configuration, data, plugin, and log paths agree with the rendered `grafana.ini`.
 
@@ -87,8 +87,12 @@ The collector plist starts the same binary and configuration that the role rende
 The generated collector configuration has one metrics pipeline:
 
 ```text
-hostmetrics -> resourcedetection -> batch -> otlphttp -> VictoriaMetrics
+hostmetrics + tcp_check + otlp_json_file/ssh_state -> resourcedetection -> batch -> otlphttp -> VictoriaMetrics
 ```
+
+`tcp_check/monitoring_server` times a TCP connect to `<monitoring_server_address>:<victoriametrics_port>` every collection interval, producing `tcpcheck_duration_milliseconds` (latency to the monitoring Mac) and `tcpcheck_status_ratio` (1 reachable, 0 failed). It is controlled by `otel_latency_check_enabled` in the agent role defaults.
+
+`com.observability.sshstate` (a root LaunchDaemon with `StartInterval`) runs `bin/observability-ssh-state` every `otel_ssh_check_interval` (30 s). The script writes a one-line OTLP/JSON snapshot to `var/ssh-state/ssh-state.json` (`0700` directory, `0600` file), and the collector's `otlp_json_file/ssh_state` receiver reads each snapshot exactly once. That works because the snapshot's timestamp sits inside the receiver's 1000-byte file fingerprint. The metrics are `ssh_remote_login_enabled`, `ssh_port_listening`, `ssh_service_up`, `ssh_sessions` and `ssh_session_start_time_seconds` (see the SSH section of CLAUDE.md for the data model).
 
 | Stage | What it does | Why it is used |
 | --- | --- | --- |
@@ -106,7 +110,12 @@ The exporter endpoint is rendered from variables as:
 http://<monitoring_server_address>:<victoriametrics_port>/opentelemetry/v1/metrics
 ```
 
-VictoriaMetrics persists the metric data. The Grafana dashboard queries VictoriaMetrics for host CPU, memory, filesystem, and network views.
+VictoriaMetrics persists the metric data. Grafana has two provisioned dashboards:
+
+- **Mac Mini Fleet Overview** (`mac-mini-fleet`): every host on shared panels, one series per `host_name`, plus a Hosts table. A multi-value **Mac Mini** variable (`label_values(system_memory_usage_bytes, host_name)`, All = `.*`) filters every panel with `host_name=~"$host_name"`.
+- **Mac Mini Detail** (`mac-mini-detail`): one reusable per-host dashboard driven by a single-value `host_name` variable. Clicking a series in a fleet time-series panel, or a host name in the Hosts table, opens it with `?var-host_name=<host>` and the current time range.
+
+Both dashboards have SSH panels. The fleet dashboard has an **SSH Access** table (Remote Login, SSH Service UP/DOWN, port, session count per host) and a **Current SSH Sessions** table. The detail dashboard has an **SSH / Access** row with the same signals for one host, plus a session-count history.
 
 ## Variables into templates
 
@@ -126,6 +135,7 @@ The roles render system LaunchDaemon plists in `/Library/LaunchDaemons` for:
 - `com.observability.victoriametrics`
 - `com.observability.grafana`
 - `com.observability.otelcol`
+- `com.observability.sshstate` (periodic, `StartInterval` instead of `KeepAlive`)
 
 `ansible.builtin.service` has no macOS implementation, so the tasks and handlers drive `launchctl` directly instead: bootstrap-if-not-loaded to start/enable, bootout+bootstrap on restart. This is the current implementation, not a claim of tested runtime behavior. For diagnostics and manual recovery, see [LAUNCHD_TROUBLESHOOTING.md](../LAUNCHD_TROUBLESHOOTING.md).
 

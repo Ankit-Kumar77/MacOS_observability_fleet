@@ -10,9 +10,9 @@
 #                           com.observability.victoriametrics.
 #   launchd_service_plist   Absolute path to the rendered plist.
 #
-# RunAtLoad and KeepAlive are always true in launchd_daemon.plist.j2, so a
-# bootstrapped daemon starts immediately and persists across reboots without
-# a separate "enable" step.
+# RunAtLoad is always true in launchd_daemon.plist.j2 (with KeepAlive, or
+# StartInterval for periodic jobs), so a bootstrapped daemon starts immediately
+# and persists across reboots without a separate "enable" step.
 
 - name: Check whether launchd has already loaded {{ launchd_service_label }}
   ansible.builtin.command:

@@ -5,3 +5,10 @@
   vars:
     launchd_service_label: com.observability.otelcol
     launchd_service_plist: /Library/LaunchDaemons/com.observability.otelcol.plist
+
+- name: Restart SSH state collector
+  ansible.builtin.include_tasks:
+    file: "{{ role_path }}/../observability_common/tasks/launchd_restart.yml"
+  vars:
+    launchd_service_label: com.observability.sshstate
+    launchd_service_plist: /Library/LaunchDaemons/com.observability.sshstate.plist

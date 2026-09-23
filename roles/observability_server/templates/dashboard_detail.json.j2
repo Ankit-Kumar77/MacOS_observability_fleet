@@ -1,0 +1,527 @@
+{#- Managed by Ansible. One reusable dashboard for any Mac: the host comes from
+    the single-value $host_name variable, which the fleet dashboard's links set
+    via ?var-host_name=<host>. Grafana legend syntax {{state}} collides with
+    Jinja delimiters, so it is escaped as {{ '{{' }}state{{ '}}' }}. Every query
+    filters on host_name=\"$host_name\" (exact match; the variable is never All). -#}
+{% set ds = {"type": "prometheus", "uid": "victoriametrics"} %}
+{#- A session series lingers in instant queries for the lookback window after
+    the session ends. Every series in one snapshot shares one timestamp, so a
+    session is current only if its latest sample is as new as its host's
+    latest ssh_sessions sample. -#}
+{% set live_sessions = 'ssh_session_start_time_seconds{host_name=\\"$host_name\\"} and on (host_name, ssh_session_id) (timestamp(ssh_session_start_time_seconds{host_name=\\"$host_name\\"}) >= on (host_name) group_left () timestamp(ssh_sessions{host_name=\\"$host_name\\"}))' %}
+{
+  "uid": "{{ grafana_detail_dashboard_uid }}",
+  "title": "Mac Mini Detail",
+  "tags": ["macos", "otel", "hostmetrics"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "links": [
+    {
+      "type": "link",
+      "title": "Mac Mini Fleet Overview",
+      "tooltip": "Back to the fleet overview",
+      "icon": "dashboard",
+      "url": "/d/{{ grafana_fleet_dashboard_uid }}",
+      "includeVars": false,
+      "keepTime": true,
+      "targetBlank": false,
+      "asDropdown": false,
+      "tags": []
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "host_name",
+        "label": "Mac Mini",
+        "description": "Hosts are discovered from the host_name label, so new Macs appear without editing the dashboard.",
+        "type": "query",
+        "datasource": {{ ds | tojson }},
+        "definition": "label_values(system_memory_usage_bytes, host_name)",
+        "query": {"qryType": 1, "query": "label_values(system_memory_usage_bytes, host_name)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "multi": false,
+        "includeAll": false,
+        "current": {},
+        "options": [],
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 19,
+      "type": "row",
+      "title": "System Metrics",
+      "collapsed": false,
+      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1},
+      "panels": []
+    },
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "CPU Usage",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 0, "y": 1, "w": 4, "h": 4},
+      "fieldConfig": {"defaults": {"unit": "percent", "decimals": 1, "min": 0, "max": 100, "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 70}, {"color": "red", "value": 90}]}}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "100 * (1 - sum(rate(system_cpu_time_seconds_total{state=\"idle\", host_name=\"$host_name\"}[5m])) / sum(rate(system_cpu_time_seconds_total{host_name=\"$host_name\"}[5m])))",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Memory Usage",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 4, "y": 1, "w": 4, "h": 4},
+      "fieldConfig": {"defaults": {"unit": "percent", "decimals": 1, "min": 0, "max": 100, "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 80}, {"color": "red", "value": 95}]}}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "sum(system_memory_usage_bytes{state=\"used\", host_name=\"$host_name\"}) / sum(system_memory_usage_bytes{host_name=\"$host_name\"}) * 100",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Disk Usage (/)",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 8, "y": 1, "w": 4, "h": 4},
+      "fieldConfig": {"defaults": {"unit": "percent", "decimals": 1, "min": 0, "max": 100, "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 80}, {"color": "red", "value": 90}]}}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "sum(system_filesystem_usage_bytes{state=\"used\", mountpoint=\"/\", host_name=\"$host_name\"}) / sum(system_filesystem_usage_bytes{mountpoint=\"/\", host_name=\"$host_name\"}) * 100",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Load Average (1m)",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 12, "y": 1, "w": 4, "h": 4},
+      "fieldConfig": {"defaults": {"unit": "none", "decimals": 2, "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "system_cpu_load_average_1m{host_name=\"$host_name\"}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Latency to Monitoring Server",
+      "description": "Latest TCP connect time to VictoriaMetrics, in whole milliseconds.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 16, "y": 1, "w": 4, "h": 4},
+      "fieldConfig": {"defaults": {"unit": "ms", "decimals": 0, "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "max(tcpcheck_duration_milliseconds{host_name=\"$host_name\"})",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Monitoring Server",
+      "description": "Result of the latest TCP check to VictoriaMetrics.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 20, "y": 1, "w": 4, "h": 4},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]},
+          "mappings": [{"type": "value", "options": {"0": {"text": "Unreachable"}, "1": {"text": "Reachable"}}}]
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "min(tcpcheck_status_ratio{host_name=\"$host_name\"})",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "CPU Usage (%)",
+      "description": "Busy CPU time as a share of total CPU time. macOS reports no per-core `cpu` label, so this normalises against the sum of all states.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 0, "y": 5, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "100 * (1 - sum(rate(system_cpu_time_seconds_total{state=\"idle\", host_name=\"$host_name\"}[5m])) / sum(rate(system_cpu_time_seconds_total{host_name=\"$host_name\"}[5m])))",
+          "legendFormat": "busy"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "CPU Time by State (%)",
+      "description": "Share of total CPU time spent in each state, stacked to 100%.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 12, "y": 5, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "custom": {"stacking": {"mode": "normal", "group": "A"}, "fillOpacity": 40}}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "sum by (state) (rate(system_cpu_time_seconds_total{host_name=\"$host_name\"}[5m])) / scalar(sum(rate(system_cpu_time_seconds_total{host_name=\"$host_name\"}[5m]))) * 100",
+          "legendFormat": "{{ '{{' }}state{{ '}}' }}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Memory Usage (%)",
+      "description": "macOS memory states are free / inactive / used; inactive is reclaimable and is not counted as used.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 0, "y": 13, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "sum(system_memory_usage_bytes{state=\"used\", host_name=\"$host_name\"}) / sum(system_memory_usage_bytes{host_name=\"$host_name\"}) * 100",
+          "legendFormat": "used"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Memory by State (bytes)",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 12, "y": 13, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "bytes", "min": 0, "custom": {"stacking": {"mode": "normal", "group": "A"}, "fillOpacity": 40}}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "sum by (state) (system_memory_usage_bytes{host_name=\"$host_name\"})",
+          "legendFormat": "{{ '{{' }}state{{ '}}' }}"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Disk Usage (%)",
+      "description": "Root APFS volume. Sibling volumes in the same container report identical capacity, so only \"/\" is charted.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 0, "y": 21, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "sum(system_filesystem_usage_bytes{state=\"used\", mountpoint=\"/\", host_name=\"$host_name\"}) / sum(system_filesystem_usage_bytes{mountpoint=\"/\", host_name=\"$host_name\"}) * 100",
+          "legendFormat": "/"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Disk I/O (bytes/sec)",
+      "description": "Summed across physical disks.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 12, "y": 21, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "Bps", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "sum by (direction) (rate(system_disk_io_bytes_total{host_name=\"$host_name\"}[5m]))",
+          "legendFormat": "{{ '{{' }}direction{{ '}}' }}"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Network Receive (bytes/sec)",
+      "description": "Per interface. Idle interfaces (utun, awdl, ...) sit at zero.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 0, "y": 29, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "Bps", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "sum by (device) (rate(system_network_io_bytes_total{direction=\"receive\", host_name=\"$host_name\"}[5m]))",
+          "legendFormat": "{{ '{{' }}device{{ '}}' }}"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Network Transmit (bytes/sec)",
+      "description": "Per interface. Idle interfaces (utun, awdl, ...) sit at zero.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 12, "y": 29, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "Bps", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "sum by (device) (rate(system_network_io_bytes_total{direction=\"transmit\", host_name=\"$host_name\"}[5m]))",
+          "legendFormat": "{{ '{{' }}device{{ '}}' }}"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Network Errors and Drops (packets/sec)",
+      "description": "Summed across interfaces.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 0, "y": 37, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "pps", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "sum by (direction) (rate(system_network_errors_total{host_name=\"$host_name\"}[5m]))",
+          "legendFormat": "errors {{ '{{' }}direction{{ '}}' }}"
+        },
+        {
+          "refId": "B",
+          "datasource": {{ ds | tojson }},
+          "expr": "sum by (direction) (rate(system_network_dropped_total{host_name=\"$host_name\"}[5m]))",
+          "legendFormat": "dropped {{ '{{' }}direction{{ '}}' }}"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "TCP Connections by State",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 12, "y": 37, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "none", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "sum by (state) (system_network_connections{protocol=\"tcp\", host_name=\"$host_name\"}) > 0",
+          "legendFormat": "{{ '{{' }}state{{ '}}' }}"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Load Average",
+      "description": "Available on macOS from the hostmetrics load scraper.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 0, "y": 45, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "none", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "system_cpu_load_average_1m{host_name=\"$host_name\"}",
+          "legendFormat": "1m"
+        },
+        {
+          "refId": "B",
+          "datasource": {{ ds | tojson }},
+          "expr": "system_cpu_load_average_5m{host_name=\"$host_name\"}",
+          "legendFormat": "5m"
+        },
+        {
+          "refId": "C",
+          "datasource": {{ ds | tojson }},
+          "expr": "system_cpu_load_average_15m{host_name=\"$host_name\"}",
+          "legendFormat": "15m"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Latency to Monitoring Server (ms)",
+      "description": "TCP connect time from this Mac to VictoriaMetrics on the monitoring Mac, measured by the collector's tcp_check receiver every collection interval. One sample per interval in whole milliseconds; this is a round-trip time, not a percentile.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 12, "y": 45, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "ms", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "max(tcpcheck_duration_milliseconds{host_name=\"$host_name\"})",
+          "legendFormat": "TCP connect"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "SSH / Access",
+      "collapsed": false,
+      "gridPos": {"x": 0, "y": 53, "w": 24, "h": 1},
+      "panels": []
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "Remote Login",
+      "description": "launchd has the sshd job (com.openssh.sshd by default) loaded, i.e. Remote Login is on.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 0, "y": 54, "w": 6, "h": 4},
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "blue"}, "mappings": [{"type": "value", "options": {"0": {"text": "Off", "color": "orange"}, "1": {"text": "On", "color": "green"}}}]}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "max(ssh_remote_login_enabled{host_name=\"$host_name\"})",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "SSH Service",
+      "description": "sshd answered with an SSH protocol banner on loopback. launchd holds port 22 open even when sshd is broken, so this is the health signal, not the open port.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 6, "y": 54, "w": 6, "h": 4},
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "blue"}, "mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "max(ssh_service_up{host_name=\"$host_name\"})",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "type": "stat",
+      "title": "SSH Port",
+      "description": "Something is listening on the SSH port (launchd, for the stock Remote Login setup).",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 12, "y": 54, "w": 6, "h": 4},
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "fieldConfig": {"defaults": {"color": {"mode": "fixed", "fixedColor": "blue"}, "mappings": [{"type": "value", "options": {"0": {"text": "Closed", "color": "red"}, "1": {"text": "Listening", "color": "green"}}}]}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "max(ssh_port_listening{host_name=\"$host_name\"})",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "type": "stat",
+      "title": "Active SSH Sessions",
+      "description": "Authenticated SSH connections right now.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 18, "y": 54, "w": 6, "h": 4},
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "fieldConfig": {"defaults": {"unit": "none", "decimals": 0, "color": {"mode": "fixed", "fixedColor": "blue"}}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "max(ssh_sessions{host_name=\"$host_name\"})",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 25,
+      "type": "table",
+      "title": "Current SSH Sessions",
+      "description": "Live authenticated SSH sessions: user, source address, terminal (notty = scp, sftp or a remote command) and login time. Only the fields shown are collected; nothing from inside the session is recorded.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 0, "y": 58, "w": 16, "h": 8},
+      "options": {"showHeader": true, "cellHeight": "sm", "sortBy": [{"displayName": "Logged in", "desc": true}]},
+      "fieldConfig": {
+        "defaults": {"custom": {"align": "auto"}},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "user_name"}, "properties": [{"id": "displayName", "value": "User"}]},
+          {"matcher": {"id": "byName", "options": "source_address"}, "properties": [{"id": "displayName", "value": "Source"}]},
+          {"matcher": {"id": "byName", "options": "ssh_session_tty"}, "properties": [{"id": "displayName", "value": "Terminal"}]},
+          {"matcher": {"id": "byName", "options": "Value #A"}, "properties": [{"id": "displayName", "value": "Logged in"}, {"id": "unit", "value": "dateTimeAsLocal"}]},
+          {"matcher": {"id": "byName", "options": "Value #B"}, "properties": [{"id": "displayName", "value": "Duration"}, {"id": "unit", "value": "dtdurations"}]}
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "({{ live_sessions }}) * 1000",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "datasource": {{ ds | tojson }},
+          "expr": "time() - ({{ live_sessions }})",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {"id": "merge", "options": {}},
+        {"id": "organize", "options": {"excludeByName": {"Time": true, "host_name": true, "os_type": true, "ssh_session_id": true}, "indexByName": {"user_name": 0, "source_address": 1, "ssh_session_tty": 2, "Value #A": 3, "Value #B": 4}}}
+      ]
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "SSH Sessions",
+      "description": "Authenticated SSH connections over time.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 16, "y": 58, "w": 8, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "none", "min": 0, "softMax": 1, "decimals": 0, "custom": {"drawStyle": "line", "lineInterpolation": "stepAfter"}}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "max(ssh_sessions{host_name=\"$host_name\"})",
+          "legendFormat": "sessions"
+        }
+      ]
+    }
+  ]
+}

@@ -21,6 +21,35 @@ otel_collector_install_dir: "{{ bin_dir }}/otelcol-contrib-{{ otel_collector_ver
 
 otel_collection_interval: 15s
 
+# Network latency from each monitored Mac to the monitoring Mac. The tcp_check
+# receiver times a TCP connect to VictoriaMetrics (monitoring_server_address:
+# victoriametrics_port) every otel_collection_interval - the same host and port
+# the metrics themselves are exported to, so no extra firewall rule is needed.
+# Emits tcpcheck_duration_milliseconds (whole milliseconds) and
+# tcpcheck_status_ratio (1 = connected, 0 = failed), labelled with host_name by
+# resourcedetection like every other metric. Disable to drop both series.
+otel_latency_check_enabled: true
+
+# SSH access state. A root LaunchDaemon (com.observability.sshstate) runs
+# templates/ssh_state.sh.j2 every otel_ssh_check_interval seconds and writes a
+# one-line OTLP/JSON snapshot into otel_ssh_state_dir; the collector's
+# otlp_json_file receiver picks it up and sends it through the normal pipeline.
+# See the script header for what is and is not collected.
+otel_ssh_monitoring_enabled: true
+otel_ssh_check_interval: 30
+otel_ssh_port: 22
+# The launchd job Remote Login loads on macOS.
+otel_ssh_launchd_label: com.openssh.sshd
+# Seconds to wait for sshd's protocol banner on loopback.
+otel_ssh_banner_timeout: 3
+# false keeps the service/port/session-count gauges but drops the per-session
+# series (user name, source address, tty, login time).
+otel_ssh_session_details_enabled: true
+# 0700 root: the snapshot names the users logged in and where from.
+otel_ssh_state_dir: "{{ var_dir }}/ssh-state"
+otel_ssh_state_program_arguments:
+  - "{{ bin_dir }}/observability-ssh-state"
+
 # launchd ProgramArguments, rendered into the shared plist template.
 otel_collector_program_arguments:
   - "{{ bin_dir }}/otelcol-contrib"

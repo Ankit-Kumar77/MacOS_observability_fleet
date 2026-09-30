@@ -1,0 +1,38 @@
+---
+# Guards that keep the no-sudo variant from producing a broken or duplicated
+# install. Included first from each role's prerequisites.yml.
+#
+# Required variables:
+#   observability_system_daemon_labels   Labels this role would conflict with
+#                                        if the system-level (sudo) variant
+#                                        is already installed on this Mac.
+
+# Connecting as root (or passing --become) would install into /var/root and
+# load the agents into root's user domain -- the opposite of this variant.
+- name: Assert the deployment runs as an unprivileged user
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['user_uid'] | int != 0
+    fail_msg: >-
+      This is the no-sudo variant: connect as the regular deployment user and
+      do not pass --become. Facts report uid {{ ansible_facts['user_uid'] }}.
+
+# /Library/LaunchDaemons is world-readable, so this check needs no sudo.
+- name: Check for system-level LaunchDaemons from the sudo variant
+  ansible.builtin.stat:
+    path: "/Library/LaunchDaemons/{{ item }}.plist"
+  loop: "{{ observability_system_daemon_labels }}"
+  register: observability_system_daemons
+
+# A root copy of the same service would hold port 8428/3000 (server) or send
+# every metric twice (agent), and removing it needs an administrator.
+- name: Assert the sudo variant is not installed on this Mac
+  ansible.builtin.assert:
+    that:
+      - observability_system_daemons.results | selectattr('stat.exists') | list | length == 0
+    fail_msg: >-
+      Found system LaunchDaemons from the sudo variant:
+      {{ observability_system_daemons.results | selectattr('stat.exists') | map(attribute='stat.path') | join(', ') }}.
+      Running both variants on one Mac conflicts. An administrator must
+      remove them first (launchctl bootout system/<label>, then delete the
+      plist and /opt/observability).

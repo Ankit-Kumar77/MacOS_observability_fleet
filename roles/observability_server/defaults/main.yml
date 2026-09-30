@@ -1,10 +1,30 @@
 ---
-# Filesystem layout. Override in inventory group_vars to relocate the stack.
-base_dir: /opt/observability
+# Filesystem layout. Everything is owned by the connecting Ansible user; no
+# sudo is used anywhere. user_dir is that user's home directory, taken from
+# gathered facts. Override in inventory group_vars to relocate the stack, but
+# keep it out of ~/Desktop, ~/Documents and ~/Downloads: macOS privacy
+# controls (TCC) block background LaunchAgents from reading those.
+base_dir: "{{ ansible_facts['user_dir'] }}/tools/observability"
 bin_dir: "{{ base_dir }}/bin"
 etc_dir: "{{ base_dir }}/etc"
 var_dir: "{{ base_dir }}/var"
 log_dir: "{{ var_dir }}/log"
+# Release archives are staged here, not in the shared /tmp, and removed after
+# extraction.
+download_dir: "{{ var_dir }}/downloads"
+
+# Per-user launchd. Plists go in the user's own LaunchAgents directory and
+# are loaded into a per-user domain, never system/.
+#
+#   user  (default) user/<uid>: loadable over SSH without a console login;
+#         plists carry LimitLoadToSessionType Background.
+#   gui   gui/<uid>: only exists while this user is logged in at the console,
+#         and its agents stop at logout; plists carry Aqua.
+#
+# See docs/NO_SUDO_VARIANT.md for what each means across logout and reboot.
+launch_agents_dir: "{{ ansible_facts['user_dir'] }}/Library/LaunchAgents"
+launchd_domain_type: user
+launchd_domain: "{{ launchd_domain_type }}/{{ ansible_facts['user_uid'] }}"
 
 # VictoriaMetrics.
 victoriametrics_version: "1.101.0"
@@ -26,6 +46,10 @@ grafana_home: "{{ base_dir }}/grafana"
 grafana_port: 3000
 # Matches the agent collection interval so Grafana picks a sensible step.
 grafana_time_interval: "15s"
+# Provisioned dashboard uids. The fleet dashboard links to the host detail
+# dashboard (and back) by uid, so both templates read them from here.
+grafana_fleet_dashboard_uid: mac-mini-fleet
+grafana_detail_dashboard_uid: mac-mini-detail
 
 # Grafana takes noticeably longer than VictoriaMetrics on first boot (sqlite
 # init plus provisioning), so it gets a longer readiness budget.

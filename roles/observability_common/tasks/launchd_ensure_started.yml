@@ -1,28 +1,45 @@
 ---
-# Idempotently bootstraps a LaunchDaemon into the system domain if it is not
-# already loaded. ansible.builtin.service has no macOS implementation --
-# "get_service_tools not implemented on target platform" -- so this drives
-# launchctl directly, per the refactor specified in LAUNCHD_TROUBLESHOOTING.md,
-# now that it has been exercised on a real Mac.
+# Idempotently bootstraps a per-user LaunchAgent into the deployment user's
+# launchd domain if it is not already loaded there. No sudo: every launchctl
+# call below targets the connecting user's own domain (launchd_domain, e.g.
+# user/501), never system/.
+#
+# ansible.builtin.service has no macOS implementation -- "get_service_tools
+# not implemented on target platform" -- so this drives launchctl directly.
 #
 # Required variables:
 #   launchd_service_label   The Label declared in the plist, e.g.
 #                           com.observability.victoriametrics.
 #   launchd_service_plist   Absolute path to the rendered plist.
+#   launchd_domain          Target domain, e.g. user/501 (role default).
+#   launchd_domain_type     user or gui (role default).
 #
-# RunAtLoad and KeepAlive are always true in launchd_daemon.plist.j2, so a
-# bootstrapped daemon starts immediately and persists across reboots without
-# a separate "enable" step.
+# RunAtLoad and KeepAlive are always true in launchd_agent.plist.j2, so a
+# bootstrapped agent starts immediately and is restarted if it exits. Unlike a
+# system LaunchDaemon it does not start at boot by itself -- see the
+# "LaunchAgent lifecycle" section of docs/NO_SUDO_VARIANT.md.
 
 - name: Check whether launchd has already loaded {{ launchd_service_label }}
   ansible.builtin.command:
-    cmd: "launchctl print system/{{ launchd_service_label }}"
+    cmd: "launchctl print {{ launchd_domain }}/{{ launchd_service_label }}"
   register: observability_launchd_status
   changed_when: false
   failed_when: false
 
-- name: Bootstrap into the system domain {{ launchd_service_label }}
+# Only reachable if launchd_domain_type was switched after a previous run.
+# Without this the old copy keeps running beside the new one: two collectors
+# double-report, and two VictoriaMetrics or Grafana instances fight over one
+# port and one data directory.
+- name: Unload from the other user launchd domain {{ launchd_service_label }}
   ansible.builtin.command:
-    cmd: "launchctl bootstrap system {{ launchd_service_plist }}"
+    cmd: "launchctl bootout {{ 'user' if launchd_domain_type == 'gui' else 'gui' }}/{{ ansible_facts['user_uid'] }}/{{ launchd_service_label }}"
+  register: observability_launchd_other_domain
+  changed_when: observability_launchd_other_domain.rc == 0
+  failed_when: false
+  when: observability_launchd_status.rc != 0
+
+- name: Bootstrap into the per-user launchd domain {{ launchd_service_label }}
+  ansible.builtin.command:
+    cmd: "launchctl bootstrap {{ launchd_domain }} {{ launchd_service_plist }}"
   when: observability_launchd_status.rc != 0
   changed_when: true

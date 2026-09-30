@@ -1,10 +1,30 @@
 ---
-# Filesystem layout. Override in inventory group_vars to relocate the stack.
-base_dir: /opt/observability
+# Filesystem layout. Everything is owned by the connecting Ansible user; no
+# sudo is used anywhere. user_dir is that user's home directory, taken from
+# gathered facts. Override in inventory group_vars to relocate the stack, but
+# keep it out of ~/Desktop, ~/Documents and ~/Downloads: macOS privacy
+# controls (TCC) block background LaunchAgents from reading those.
+base_dir: "{{ ansible_facts['user_dir'] }}/tools/observability"
 bin_dir: "{{ base_dir }}/bin"
 etc_dir: "{{ base_dir }}/etc"
 var_dir: "{{ base_dir }}/var"
 log_dir: "{{ var_dir }}/log"
+# Release archives are staged here, not in the shared /tmp, and removed after
+# extraction.
+download_dir: "{{ var_dir }}/downloads"
+
+# Per-user launchd. Plists go in the user's own LaunchAgents directory and
+# are loaded into a per-user domain, never system/.
+#
+#   user  (default) user/<uid>: loadable over SSH without a console login;
+#         plists carry LimitLoadToSessionType Background.
+#   gui   gui/<uid>: only exists while this user is logged in at the console,
+#         and its agents stop at logout; plists carry Aqua.
+#
+# See docs/NO_SUDO_VARIANT.md for what each means across logout and reboot.
+launch_agents_dir: "{{ ansible_facts['user_dir'] }}/Library/LaunchAgents"
+launchd_domain_type: user
+launchd_domain: "{{ launchd_domain_type }}/{{ ansible_facts['user_uid'] }}"
 
 # OpenTelemetry Collector Contrib.
 #
@@ -20,6 +40,15 @@ otel_collector_checksum: "sha256:7e317b75b1b087ba2150bf95d79e39a394d0d091f1231af
 otel_collector_install_dir: "{{ bin_dir }}/otelcol-contrib-{{ otel_collector_version }}"
 
 otel_collection_interval: 15s
+
+# Network latency from each monitored Mac to the monitoring Mac. The tcp_check
+# receiver times a TCP connect to VictoriaMetrics (monitoring_server_address:
+# victoriametrics_port) every otel_collection_interval - the same host and port
+# the metrics themselves are exported to, so no extra firewall rule is needed.
+# Emits tcpcheck_duration_milliseconds (whole milliseconds) and
+# tcpcheck_status_ratio (1 = connected, 0 = failed), labelled with host_name by
+# resourcedetection like every other metric. Disable to drop both series.
+otel_latency_check_enabled: true
 
 # launchd ProgramArguments, rendered into the shared plist template.
 otel_collector_program_arguments:

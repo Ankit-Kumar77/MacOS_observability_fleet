@@ -32,6 +32,16 @@ receivers:
 {% endfor %}
       network:
       load:
+{% if otel_latency_check_enabled | bool %}
+
+  # TCP connect time to VictoriaMetrics = network round-trip latency from this
+  # Mac to the monitoring Mac. Needs no credentials, so it is unaffected by
+  # victoriametrics_auth_enabled.
+  tcp_check/monitoring_server:
+    collection_interval: {{ otel_collection_interval }}
+    targets:
+      - endpoint: "{{ monitoring_server_address }}:{{ victoriametrics_port }}"
+{% endif %}
 
 processors:
   batch:
@@ -56,6 +66,6 @@ service:
 {% endif %}
   pipelines:
     metrics:
-      receivers: [hostmetrics]
+      receivers: [hostmetrics{{ ', tcp_check/monitoring_server' if otel_latency_check_enabled | bool else '' }}]
       processors: [resourcedetection, batch]
       exporters: [otlphttp]

@@ -5,8 +5,6 @@
   ansible.builtin.copy:
     content: "{{ victoriametrics_auth_password }}"
     dest: "{{ etc_dir }}/victoriametrics-auth-password"
-    owner: root
-    group: wheel
     mode: '0600'
   no_log: true
   when: victoriametrics_auth_enabled
@@ -20,7 +18,7 @@
     observability_archive_component: VictoriaMetrics
     observability_archive_url: "{{ victoriametrics_download_url }}"
     observability_archive_checksum: "{{ victoriametrics_checksum }}"
-    observability_archive_tmp_path: "/tmp/victoria-metrics-{{ victoriametrics_version }}.tar.gz"
+    observability_archive_tmp_path: "{{ download_dir }}/victoria-metrics-{{ victoriametrics_version }}.tar.gz"
     observability_archive_install_dir: "{{ victoriametrics_install_dir }}"
     observability_archive_binary_path: "{{ victoriametrics_install_dir }}/victoria-metrics-prod"
 
@@ -31,18 +29,14 @@
     src: "{{ victoriametrics_install_dir }}/victoria-metrics-prod"
     dest: "{{ bin_dir }}/victoria-metrics-prod"
     state: link
-    owner: root
-    group: wheel
     follow: false
     force: true
   notify: Restart VictoriaMetrics
 
 - name: Generate VictoriaMetrics launchd plist
   ansible.builtin.template:
-    src: "{{ role_path }}/../observability_common/templates/launchd_daemon.plist.j2"
-    dest: /Library/LaunchDaemons/com.observability.victoriametrics.plist
-    owner: root
-    group: wheel
+    src: "{{ role_path }}/../observability_common/templates/launchd_agent.plist.j2"
+    dest: "{{ launch_agents_dir }}/com.observability.victoriametrics.plist"
     mode: '0644'
   vars:
     launchd_label: com.observability.victoriametrics
@@ -57,4 +51,4 @@
     tasks_from: launchd_ensure_started
   vars:
     launchd_service_label: com.observability.victoriametrics
-    launchd_service_plist: /Library/LaunchDaemons/com.observability.victoriametrics.plist
+    launchd_service_plist: "{{ launch_agents_dir }}/com.observability.victoriametrics.plist"

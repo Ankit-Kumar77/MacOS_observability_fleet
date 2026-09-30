@@ -57,9 +57,9 @@
   no_log: true
   tags: ['verify']
 
-- name: Verify the fleet dashboard was provisioned
+- name: Verify the fleet and detail dashboards were provisioned
   ansible.builtin.uri:
-    url: "http://localhost:{{ grafana_port }}/api/dashboards/uid/mac-mini-fleet"
+    url: "http://localhost:{{ grafana_port }}/api/dashboards/uid/{{ item }}"
     url_username: admin
     url_password: "{{ grafana_admin_password }}"
     force_basic_auth: true
@@ -69,6 +69,9 @@
   until: observability_server_dashboard.status is defined and observability_server_dashboard.status == 200
   retries: "{{ grafana_ready_retries }}"
   delay: "{{ service_ready_delay }}"
+  loop:
+    - "{{ grafana_fleet_dashboard_uid }}"
+    - "{{ grafana_detail_dashboard_uid }}"
   no_log: true
   tags: ['verify']
 
@@ -76,5 +79,5 @@
   ansible.builtin.debug:
     msg: >-
       VictoriaMetrics and Grafana are healthy, the VictoriaMetrics datasource is
-      registered, and the Mac Mini fleet dashboard is provisioned.
+      registered, and the Mac Mini fleet and detail dashboards are provisioned.
   tags: ['verify']

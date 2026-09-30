@@ -2,8 +2,6 @@
 
 ## 1. Project overview
 
-> This branch is the **no-sudo variant**: no sudo/admin rights, everything under the deployment user's home, per-user LaunchAgents instead of root LaunchDaemons, and no SSH observability. See [NO_SUDO_VARIANT.md](NO_SUDO_VARIANT.md) for the comparison with the system-level deployment and the LaunchAgent limitations.
-
 This project uses Ansible to deploy host-metric observability to Apple Silicon Mac Minis. It solves the practical problem of seeing CPU, memory, filesystem, disk, network, and load information from multiple Macs in one place instead of logging in to each machine individually.
 
 Ansible automates installation, directory creation, configuration rendering, dashboard provisioning, launchd plist creation, service requests, and basic verification. The design has two responsibilities: one monitoring Mac stores and displays metrics, while each worker/monitored Mac collects and sends its own metrics.
@@ -61,14 +59,14 @@ Ansible reads inventory and group variables for a target host, runs the matching
 
 When `observability_server` runs, it performs the following sequence:
 
-1. Runs the preflight checks (not root; no sudo-variant LaunchDaemons for these services), then creates `~/tools/observability` directories for binaries, configuration, data, plugins, downloads, and logs, owned by the deployment user.
+1. Creates `/opt/observability` directories for binaries, configuration, data, plugins, and logs.
 2. Writes the `0600` VictoriaMetrics basic-auth password file.
-3. Downloads, checksum-verifies and extracts `victoria-metrics-prod` into a versioned directory, then repoints the stable `~/tools/observability/bin/victoria-metrics-prod` symlink at it.
+3. Downloads, checksum-verifies and extracts `victoria-metrics-prod` into a versioned directory, then repoints the stable `/opt/observability/bin/victoria-metrics-prod` symlink at it.
 4. Renders `com.observability.victoriametrics.plist` with the binary, data path, port, retention, the Prometheus-naming flag, and the auth credentials.
-5. Downloads, checksum-verifies and extracts Grafana into a versioned directory, then repoints the `~/tools/observability/grafana` symlink.
-6. Renders `grafana.ini` and the Grafana LaunchAgent plist in `~/Library/LaunchAgents`.
+5. Downloads, checksum-verifies and extracts Grafana into a versioned directory, then repoints the `/opt/observability/grafana` symlink.
+6. Renders `grafana.ini` and the Grafana launchd plist.
 7. Provisions the VictoriaMetrics datasource, dashboard provider, the Mac Mini fleet dashboard, and the Mac Mini detail dashboard.
-8. Bootstraps each LaunchAgent into the user's `user/<uid>` launchd domain if it is not loaded, then flushes handlers so verification sees the current configuration.
+8. Requests service start/enable, then flushes handlers so verification sees the current configuration.
 9. Verifies both health endpoints, that VictoriaMetrics accepts the configured credentials and rejects unauthenticated queries, the Grafana datasource API, and that the fleet and detail dashboards were provisioned.
 
 VictoriaMetrics listens on the shared `victoriametrics_port` variable, currently `8428`. Grafana listens on the server-only `grafana_port`, currently `3000`.
@@ -77,23 +75,22 @@ VictoriaMetrics listens on the shared `victoriametrics_port` variable, currently
 
 When `observability_agent` runs, it:
 
-1. Asserts the `monitoring_server` group holds exactly one host with an address, runs the preflight checks, then creates the shared `~/tools/observability` directory structure.
+1. Asserts the `monitoring_server` group holds exactly one host with an address, then creates the shared `/opt/observability` directory structure.
 2. Downloads and checksum-verifies the configured Darwin ARM64 `otelcol-contrib` archive.
-3. Extracts it into a versioned directory, asserts the binary exists, and repoints the stable `~/tools/observability/bin/otelcol-contrib` symlink.
-4. Renders `~/tools/observability/etc/otel-config.yaml` as `0600` (it carries the VictoriaMetrics password).
-5. Renders `~/Library/LaunchAgents/com.observability.otelcol.plist` with the binary, configuration, and log paths.
-6. Bootstraps the collector into `user/<uid>` if it is not loaded, then flushes handlers.
+3. Extracts it into a versioned directory, asserts the binary exists, and repoints the stable `/opt/observability/bin/otelcol-contrib` symlink.
+4. Renders `/opt/observability/etc/otel-config.yaml` as `0600` (it carries the VictoriaMetrics password).
+5. Renders `com.observability.otelcol.plist` with the binary, configuration, and log paths. Before that, it installs the SSH state script (`bin/observability-ssh-state`), its `0700` snapshot directory and the periodic `com.observability.sshstate.plist`.
+6. Requests collector start/enable, then flushes handlers.
 7. Checks reachability to the monitoring Mac on port `8428`, validates the rendered configuration with `otelcol-contrib validate`, and waits for this Mac's metrics to actually appear in VictoriaMetrics.
 
 ## 7. OpenTelemetry in simple terms
 
-OpenTelemetry Collector is a configurable telemetry process. It receives, processes, and exports telemetry; here it is used for host metrics and for latency to the monitoring Mac.
+OpenTelemetry Collector is a configurable telemetry process. It receives, processes, and exports telemetry; here it is used only for host metrics.
 
 | Pipeline part | Meaning in this project |
 | --- | --- |
 | Receiver | The input component. `hostmetrics` reads metrics from the local macOS host. |
 | `hostmetrics` | Collects CPU, memory, disk, filesystem, network, and load metrics every 15 seconds. |
-| `tcp_check` | Times a TCP connect to VictoriaMetrics on the monitoring Mac every 15 seconds (`tcpcheck_duration_milliseconds`), which the dashboards show as latency. |
 | Processor | Changes or prepares data before export. |
 | `resourcedetection` | Adds system metadata, including the operating-system hostname used to identify the source Mac. |
 | `batch` | Groups metrics before transmission to reduce individual export operations. |
@@ -103,7 +100,7 @@ The project uses this native collector pipeline instead of a Node Exporter/Prome
 
 ## 8. VictoriaMetrics
 
-VictoriaMetrics is the monitoring Mac's metric storage service. It receives the metric payloads sent by agents, stores them under `~/tools/observability/var/victoriametrics`, and exposes a health endpoint.
+VictoriaMetrics is the monitoring Mac's metric storage service. It receives the metric payloads sent by agents, stores them under `/opt/observability/var/victoriametrics`, and exposes a health endpoint.
 
 The configured OTLP/HTTP ingestion endpoint is:
 
@@ -117,7 +114,7 @@ The full endpoint includes the inventory-derived monitoring-server address and p
 
 Grafana is the visualization layer. The server role provisions a VictoriaMetrics datasource and two dashboards. **Mac Mini Fleet Overview** shows every host on shared panels (CPU, memory, disk, network, load, latency to the monitoring Mac) with a **Mac Mini** selector to narrow them. Clicking a host's series or its name in the Hosts table opens **Mac Mini Detail**, one reusable dashboard that takes the host as a variable.
 
-Grafana's configuration is rendered under `~/tools/observability/etc/grafana`, its application is under `~/tools/observability/grafana`, and its service listens on port `3000` by default.
+Grafana's configuration is rendered under `/opt/observability/etc/grafana`, its application is under `/opt/observability/grafana`, and its service listens on port `3000` by default.
 
 ## 10. End-to-end example
 
@@ -134,12 +131,12 @@ If CPU use increases on Worker Mac 01:
 
 Use one monitoring Mac and one worker Mac for the first real-world test.
 
-1. Prepare the monitoring Mac with SSH access for the deployment user (no sudo needed); check ports `8428` and `3000` are available.
+1. Prepare the monitoring Mac with SSH and sudo access; check ports `8428` and `3000` are available.
 2. Add the monitoring Mac and one worker to the inventory.
-3. Run the server play: `ansible-playbook -i inventories/production/hosts.yml site.yml --tags server`.
+3. Run the server play: `ansible-playbook -i inventories/production/hosts.yml site.yml --tags server --ask-become-pass`.
 4. Verify VictoriaMetrics at `http://localhost:8428/health` on the monitoring Mac.
 5. Verify Grafana at `http://<monitoring-mac-address>:3000` and confirm its datasource.
-6. Prepare one worker Mac with SSH access and network reachability to the monitoring Mac on port `8428`.
+6. Prepare one worker Mac with SSH/sudo access and network reachability to the monitoring Mac on port `8428`.
 7. Run the agent play with the worker inventory alias in `--limit`.
 8. Validate the collector configuration and check the collector log.
 9. Confirm metrics reach VictoriaMetrics.
@@ -151,28 +148,27 @@ Use one monitoring Mac and one worker Mac for the first real-world test.
 The final fleet size is not fixed. To scale, add each Mac to `monitored_nodes` in the inventory and run the same agent role:
 
 ```bash
-ansible-playbook -i inventories/production/hosts.yml site.yml --tags agent
+ansible-playbook -i inventories/production/hosts.yml site.yml --tags agent --ask-become-pass
 ```
 
 To stage deployment or troubleshoot one Mac, use its inventory alias:
 
 ```bash
-ansible-playbook -i inventories/production/hosts.yml site.yml --limit <worker-alias> --tags agent
+ansible-playbook -i inventories/production/hosts.yml site.yml --limit <worker-alias> --tags agent --ask-become-pass
 ```
 
 No new role is needed for more Macs. Inventory membership determines where `observability_agent` runs.
 
 ## 13. launchd
 
-`launchd` is macOS's native service manager. This variant renders **per-user LaunchAgent** plists into `~/Library/LaunchAgents` for:
+`launchd` is macOS's native service manager. The project renders system LaunchDaemon plists in `/Library/LaunchDaemons` for:
 
 - `com.observability.victoriametrics`
 - `com.observability.grafana`
 - `com.observability.otelcol`
+- `com.observability.sshstate` (runs every `otel_ssh_check_interval` seconds via `StartInterval`)
 
-All three are rendered from a single shared template, `roles/observability_common/templates/launchd_agent.plist.j2`. Each calling role supplies the label, the `ProgramArguments` list (kept in that role's `defaults/main.yml`) and the log paths, so the plists cannot drift apart. `ansible.builtin.service` has no macOS implementation, so the roles drive `launchctl` directly, always in the deployment user's own `user/<uid>` domain and never `system/`: bootstrap-if-not-loaded on install, and bootout+bootstrap on restart.
-
-The plists set `LimitLoadToSessionType` to `Background`. Without it, launchd refuses to let a non-admin user bootstrap them into `user/<uid>`. Unlike root LaunchDaemons, **LaunchAgents are not started at boot**, so re-run the play for a Mac after it reboots. [NO_SUDO_VARIANT.md](NO_SUDO_VARIANT.md#launchagent-lifecycle) covers logout, reboot and the optional `gui` domain.
+All four are rendered from a single shared template, `roles/observability_common/templates/launchd_daemon.plist.j2`. Each calling role supplies the label, the `ProgramArguments` list (kept in that role's `defaults/main.yml`) and the log paths, so the plists cannot drift apart. `ansible.builtin.service` has no macOS implementation, so the roles drive `launchctl` directly (bootstrap-if-not-loaded on install, bootout+bootstrap on restart) via shared task files in `observability_common`. This has not yet been confirmed working end to end on a real Mac Mini; use [LAUNCHD_TROUBLESHOOTING.md](../LAUNCHD_TROUBLESHOOTING.md) for diagnostic commands and manual recovery.
 
 ## 14. Variables and dynamic configuration
 
@@ -187,7 +183,7 @@ For example, `monitoring_server_address` is derived from the first host in the `
 ## 15. Security
 
 - Use SSH keys or an approved SSH authentication mechanism for Ansible access.
-- The Ansible user needs **no** sudo privileges: installation paths and LaunchAgent plists are all in that user's home directory. Do not grant sudo for this deployment.
+- The Ansible user needs sudo privileges because installation paths and LaunchDaemon plists are system locations.
 - **By default this project ships with no auth on either service**: `victoriametrics_auth_enabled: false` and a plain, checked-in `grafana_admin_password: admin`. This is intended for local/testing use only — anyone able to reach port 8428 can read, write or delete fleet metrics, and Grafana logs in with the default credentials.
 - For anything beyond local testing, set `victoriametrics_auth_enabled: true` with a real username/password, and replace `grafana_admin_password` with a real value — plain or via Ansible Vault (`ansible-vault encrypt_string`).
 - Do not commit real passwords, private keys, or production credentials to Git.
@@ -198,8 +194,8 @@ For example, `monitoring_server_address` is derived from the first host in the `
 | Category | Responsibility |
 | --- | --- |
 | Automated by Ansible | Directories, downloads, archive extraction, templates, datasource/dashboard provisioning, plist creation, service requests, and verification tasks. |
-| Manual initial setup | Select Macs, prepare inventory, provide SSH access (no sudo), optionally set real credentials (plain or vaulted) if enabling auth, and permit network access. |
-| Requires real-Mac validation | Deployment over real SSH, LaunchAgents surviving SSH logout and reboots, runtime permissions, firewall policy, service health, and end-to-end metric ingestion. |
+| Manual initial setup | Select Macs, prepare inventory, provide SSH/sudo access, optionally set real credentials (plain or vaulted) if enabling auth, and permit network access. |
+| Requires real-Mac validation | Apple Silicon archive execution, launchd loading/restarts, runtime permissions, firewall policy, service health, and end-to-end metric ingestion. |
 
 ## 17. Common teammate questions
 
@@ -221,8 +217,7 @@ For example, `monitoring_server_address` is derived from the first host in the `
 | How do workers know where to send metrics? | The address is derived from the `monitoring_server` inventory group and rendered into the collector config. |
 | How does the project scale to N Macs? | Add hosts to `monitored_nodes` and reuse the same agent role. |
 | What happens if the monitoring Mac is down? | Agents cannot deliver metrics to its endpoint; review collector logs and restore monitoring-Mac availability. |
-| Where are metrics stored? | In VictoriaMetrics under `~/tools/observability/var/victoriametrics` on the monitoring Mac. |
-| Is SSH access monitored? | Not in this variant. SSH observability was removed; Ansible still uses SSH to manage the Macs. |
+| Where are metrics stored? | In VictoriaMetrics under `/opt/observability/var/victoriametrics` on the monitoring Mac. |
 | What happens if a collector stops? | That Mac stops exporting new metrics until the collector service is restored. |
 | What needs real-Mac testing? | launchd behavior, binaries, permissions, networking, health checks, and end-to-end metrics. |
 
@@ -244,7 +239,7 @@ The repository is a template for a real environment. It avoids embedding environ
 
 - Real Mac Mini hostnames or reachable addresses in `inventories/production/hosts.yml`.
 - The correct `ansible_user` for every Mac.
-- SSH key/authentication access for that user (no sudo permission needed).
+- SSH key/authentication access and sudo permission for that user.
 - Exactly one Mac assigned to `monitoring_server`.
 - All collector Macs assigned to `monitored_nodes`.
 - A reachable monitoring-Mac address; agents derive this from the selected monitoring-server inventory host.

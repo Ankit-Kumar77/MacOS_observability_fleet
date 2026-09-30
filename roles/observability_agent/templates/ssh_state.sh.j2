@@ -1,0 +1,126 @@
+#!/bin/sh
+# Managed by Ansible (roles/observability_agent). Local edits are overwritten.
+#
+# Writes a one-line OTLP/JSON snapshot of this Mac's SSH access state for the
+# collector's otlp_json_file receiver. Run by launchd every
+# {{ otel_ssh_check_interval }}s as com.observability.sshstate.
+#
+# Read-only: it runs launchctl print, netstat, nc, ps and lsof, and records
+# only the fields listed below. It never reads terminal contents, commands,
+# keys, environment variables or the sshd log.
+#
+#   ssh.remote_login.enabled  launchd has {{ otel_ssh_launchd_label }} loaded (Remote Login on)
+#   ssh.port.listening        something is listening on TCP {{ otel_ssh_port }}
+#   ssh.service.up            sshd answered on loopback with an SSH protocol banner
+#   ssh.sessions              authenticated SSH connections right now
+#   ssh.session.start_time    one series per live session (user, source address,
+#                             tty, sshd pid), value = login time in unix seconds
+#
+# macOS runs sshd socket-activated: launchd owns the listening socket and
+# spawns sshd per connection, so port {{ otel_ssh_port }} reads as open even if sshd
+# itself is broken. Only a banner proves sshd actually runs.
+#
+# A session is an sshd process titled "sshd: <user>@<tty>" or, on OpenSSH 9.8+,
+# "sshd-session: <user>@<tty>" (tty is "notty" for scp/sftp/remote commands).
+# Only post-authentication sshd processes carry that title, and local console
+# or Terminal logins have no sshd process at all. The process must also hold an
+# established connection on the SSH port, which is where the source address
+# comes from.
+#
+# Root is required: other users' process titles and sockets are not visible
+# to an unprivileged ps/lsof on macOS.
+
+set -u
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+LC_ALL=C
+export PATH LC_ALL
+umask 077
+
+state_dir='{{ otel_ssh_state_dir }}'
+ssh_port='{{ otel_ssh_port }}'
+launchd_label='{{ otel_ssh_launchd_label }}'
+banner_timeout='{{ otel_ssh_banner_timeout }}'
+session_details='{{ 1 if otel_ssh_session_details_enabled | bool else 0 }}'
+
+now=$(date +%s)
+
+if launchctl print "system/${launchd_label}" >/dev/null 2>&1; then
+    enabled=1
+else
+    enabled=0
+fi
+
+if netstat -an -p tcp 2>/dev/null |
+    awk -v port="${ssh_port}" '$6 == "LISTEN" && $4 ~ ("[.:]" port "$") { found = 1 } END { exit !found }'; then
+    listening=1
+else
+    listening=0
+fi
+
+up=0
+if [ "${listening}" -eq 1 ]; then
+    banner=$(nc -G "${banner_timeout}" -w "${banner_timeout}" 127.0.0.1 "${ssh_port}" </dev/null 2>/dev/null | head -n 1)
+    case "${banner}" in
+        SSH-2.0-* | SSH-1.99-*) up=1 ;;
+    esac
+fi
+
+# pid user tty elapsed-seconds, one line per authenticated session.
+sessions=$(ps -axww -o pid=,etime=,command= 2>/dev/null | awk '
+    NF == 4 && $3 ~ /^sshd(-session)?:$/ && $4 ~ /^[^@]+@[^@]+$/ {
+        split($4, who, "@")
+        n = split($2, t, /[-:]/)
+        secs = t[n] + t[n - 1] * 60
+        if (n >= 3) secs += t[n - 2] * 3600
+        if (n == 4) secs += t[1] * 86400
+        print $1, who[1], who[2], secs
+    }')
+
+# pid remote-address, from each session process's own established socket on
+# the SSH port. A session must hold one to be counted, so a process that merely
+# names itself "sshd: ..." is never reported as a session.
+addresses=""
+if [ -n "${sessions}" ]; then
+    pids=$(printf '%s\n' "${sessions}" | awk '{ printf "%s%s", sep, $1; sep = "," }')
+    addresses=$(lsof -nP -a -iTCP -sTCP:ESTABLISHED -p "${pids}" -F pn 2>/dev/null | awk -v port="${ssh_port}" '
+        /^p/ { pid = substr($0, 2) }
+        /^n/ {
+            split(substr($0, 2), ends, "->")
+            local = ends[1]; remote = ends[2]
+            if (local !~ (":" port "$")) next
+            sub(/:[0-9]+$/, "", remote)
+            gsub(/[\[\]]/, "", remote)
+            print pid, remote
+        }')
+fi
+
+# The timestamp must stay within the first 1000 bytes (the receiver's file
+# fingerprint): it is what makes each snapshot a new file to otlp_json_file,
+# so every snapshot is read exactly once.
+{
+    printf '%s\n' "${addresses}" | sed 's/^/A /'
+    printf '%s\n' "${sessions}" | sed 's/^/S /'
+} | awk -v now="${now}" -v enabled="${enabled}" -v listening="${listening}" -v up="${up}" -v details="${session_details}" '
+    function clean(value, allowed) { gsub("[^" allowed "]", "", value); return value == "" ? "unknown" : value }
+    function attr(key, value) { return "{\"key\":\"" key "\",\"value\":{\"stringValue\":\"" value "\"}}" }
+    function gauge(name, unit, description, points) {
+        return "{\"name\":\"" name "\",\"unit\":\"" unit "\",\"description\":\"" description "\",\"gauge\":{\"dataPoints\":[" points "]}}"
+    }
+    function point(value, attrs) { return "{\"timeUnixNano\":\"" now "000000000\",\"asInt\":\"" value "\"" (attrs == "" ? "" : ",\"attributes\":[" attrs "]") "}" }
+    $1 == "A" && NF == 3 { address[$2] = $3 }
+    $1 == "S" && NF == 5 && ($2 in address) {
+        count++
+        if (details == 1) {
+            attrs = attr("user.name", clean($3, "A-Za-z0-9._-")) "," attr("source.address", clean(address[$2], "0-9A-Fa-f.:%")) "," attr("ssh.session.tty", clean($4, "A-Za-z0-9,")) "," attr("ssh.session.id", clean($2, "0-9"))
+            sessions = sessions (sessions == "" ? "" : ",") point(now - $5, attrs)
+        }
+    }
+    END {
+        metrics = gauge("ssh.remote_login.enabled", "", "1 if launchd has the sshd job loaded (Remote Login on).", point(enabled, ""))
+        metrics = metrics "," gauge("ssh.port.listening", "", "1 if the SSH port is listening.", point(listening, ""))
+        metrics = metrics "," gauge("ssh.service.up", "", "1 if sshd answered with an SSH protocol banner on loopback.", point(up, ""))
+        metrics = metrics "," gauge("ssh.sessions", "{session}", "Authenticated SSH connections.", point(count + 0, ""))
+        if (sessions != "") metrics = metrics "," gauge("ssh.session.start_time", "s", "Login time of each live SSH session.", sessions)
+        printf "{\"resourceMetrics\":[{\"resource\":{},\"scopeMetrics\":[{\"scope\":{\"name\":\"observability.ssh_state\"},\"metrics\":[%s]}]}]}\n", metrics
+    }' >"${state_dir}/ssh-state.json.tmp" &&
+    mv -f "${state_dir}/ssh-state.json.tmp" "${state_dir}/ssh-state.json"

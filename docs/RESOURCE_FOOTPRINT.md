@@ -27,12 +27,12 @@ constraint.
 
 ### What is included
 
-- **Monitoring Mac:** `~/tools/observability/bin/victoria-metrics-prod`, the Grafana installation under `~/tools/observability/grafana`, Grafana/VictoriaMetrics configuration, provisioning files, LaunchAgent plists, and initial logs. All of it lives in the deployment user's home, so it counts against that volume and any per-user quota.
-- **Worker/Monitored Mac:** `~/tools/observability/bin/otelcol-contrib`, `~/tools/observability/etc/otel-config.yaml`, the collector LaunchAgent plist, and initial logs.
+- **Monitoring Mac:** `/opt/observability/bin/victoria-metrics-prod`, the Grafana installation under `/opt/observability/grafana`, Grafana/VictoriaMetrics configuration, provisioning files, launchd plists, and initial logs.
+- **Worker/Monitored Mac:** `/opt/observability/bin/otelcol-contrib`, `/opt/observability/etc/otel-config.yaml`, the collector launchd plist, and initial logs.
 
-Each release is installed into its own versioned directory (for example `~/tools/observability/grafana-13.2.0`) with a stable symlink pointing at the active one. Upgrading does not remove the previous version, so the installed footprint grows by roughly one full installation for every version deployed until old directories are pruned deliberately. Budget for at least two concurrent versions on any Mac that has been upgraded once.
+Each release is installed into its own versioned directory (for example `/opt/observability/grafana-13.2.0`) with a stable symlink pointing at the active one. Upgrading does not remove the previous version, so the installed footprint grows by roughly one full installation for every version deployed until old directories are pruned deliberately. Budget for at least two concurrent versions on any Mac that has been upgraded once.
 
-The install tasks download version-stamped archives to `~/tools/observability/var/downloads` before extraction and delete each one once it has been extracted and verified. They are not included in the table, but budget for the largest archive (Grafana, roughly 200 MB) as transient space during a deployment.
+The current install tasks download version-stamped archives to `/tmp` before extraction. Those temporary archives are not included in the table because they are not part of the intended installed footprint, but they can temporarily consume additional disk space during deployment if the operating system does not clean them up.
 
 ## Runtime / Data Growth
 
@@ -44,7 +44,7 @@ VictoriaMetrics historical metric storage is not included in the initial monitor
 - Retention period.
 - Metric cardinality, including distinct host and filesystem/network attributes.
 
-Logs under `~/tools/observability/var/log` can also grow over time, especially when a service repeatedly fails or cannot reach its destination. The current project does not configure log rotation; monitor this directory during the first real-Mac test.
+Logs under `/opt/observability/var/log` can also grow over time, especially when a service repeatedly fails or cannot reach its destination. The current project does not configure log rotation; monitor this directory during the first real-Mac test.
 
 ## Scaling Formula
 

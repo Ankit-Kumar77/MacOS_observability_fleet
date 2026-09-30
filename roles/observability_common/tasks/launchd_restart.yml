@@ -1,29 +1,22 @@
 ---
-# Reloads a per-user LaunchAgent after its plist or a config file it reads has
+# Reloads a LaunchDaemon after its plist or a config file it reads has
 # changed. bootout followed by bootstrap picks up the new definition;
 # kickstart -k alone would restart the process but keep serving whatever
 # definition launchd already had loaded. Meant to be included from a handler
-# notified by the plist template task and any config templates the agent
-# reads. Both commands target the deployment user's own domain; no sudo.
+# notified by the plist template task and any config templates the daemon
+# reads.
 #
 # Required variables:
 #   launchd_service_label   The Label declared in the plist.
 #   launchd_service_plist   Absolute path to the rendered plist.
-#   launchd_domain          Target domain, e.g. user/501 (role default).
 
 - name: Unload the previous definition of {{ launchd_service_label }}
   ansible.builtin.command:
-    cmd: "launchctl bootout {{ launchd_domain }}/{{ launchd_service_label }}"
+    cmd: "launchctl bootout system/{{ launchd_service_label }}"
   failed_when: false
   changed_when: true
 
-# bootout returns before launchd has finished tearing the job down, and a
-# bootstrap that lands in that window fails with "5: Input/output error".
 - name: Load the current definition of {{ launchd_service_label }}
   ansible.builtin.command:
-    cmd: "launchctl bootstrap {{ launchd_domain }} {{ launchd_service_plist }}"
-  register: observability_launchd_bootstrap
-  until: observability_launchd_bootstrap.rc == 0
-  retries: 5
-  delay: 2
+    cmd: "launchctl bootstrap system {{ launchd_service_plist }}"
   changed_when: true

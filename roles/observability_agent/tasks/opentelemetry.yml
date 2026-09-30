@@ -7,7 +7,7 @@
     observability_archive_component: OpenTelemetry Collector
     observability_archive_url: "{{ otel_collector_download_url }}"
     observability_archive_checksum: "{{ otel_collector_checksum }}"
-    observability_archive_tmp_path: "{{ download_dir }}/otelcol-contrib-{{ otel_collector_version }}.tar.gz"
+    observability_archive_tmp_path: "/tmp/otelcol-contrib-{{ otel_collector_version }}.tar.gz"
     observability_archive_install_dir: "{{ otel_collector_install_dir }}"
     observability_archive_binary_path: "{{ otel_collector_install_dir }}/otelcol-contrib"
 
@@ -18,6 +18,8 @@
     src: "{{ otel_collector_install_dir }}/otelcol-contrib"
     dest: "{{ bin_dir }}/otelcol-contrib"
     state: link
+    owner: root
+    group: wheel
     follow: false
     force: true
   notify: Restart OTel Collector
@@ -28,14 +30,18 @@
   ansible.builtin.template:
     src: otel-config.yaml.j2
     dest: "{{ etc_dir }}/otel-config.yaml"
+    owner: root
+    group: wheel
     mode: '0600'
   no_log: "{{ victoriametrics_auth_enabled }}"
   notify: Restart OTel Collector
 
 - name: Generate OTel Collector launchd plist
   ansible.builtin.template:
-    src: "{{ role_path }}/../observability_common/templates/launchd_agent.plist.j2"
-    dest: "{{ launch_agents_dir }}/com.observability.otelcol.plist"
+    src: "{{ role_path }}/../observability_common/templates/launchd_daemon.plist.j2"
+    dest: /Library/LaunchDaemons/com.observability.otelcol.plist
+    owner: root
+    group: wheel
     mode: '0644'
   vars:
     launchd_label: com.observability.otelcol
@@ -50,4 +56,4 @@
     tasks_from: launchd_ensure_started
   vars:
     launchd_service_label: com.observability.otelcol
-    launchd_service_plist: "{{ launch_agents_dir }}/com.observability.otelcol.plist"
+    launchd_service_plist: /Library/LaunchDaemons/com.observability.otelcol.plist

@@ -1,11 +1,5 @@
 # Writeup: macOS compatibility, correctness and hardening
 
-> **Historical document.** This records the review of the system-level (sudo)
-> deployment, so its paths (`/opt/observability`, `root:wheel`,
-> `/Library/LaunchDaemons`) describe that variant. On this branch, the no-sudo
-> variant, everything is user-owned under `~/tools/observability` and runs as
-> per-user LaunchAgents. See [docs/NO_SUDO_VARIANT.md](docs/NO_SUDO_VARIANT.md).
-
 This document explains everything changed in this branch, why, and what was
 verified versus what still needs real hardware. It is written for whoever
 reviews or deploys this next.

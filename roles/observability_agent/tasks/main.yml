@@ -1,6 +1,10 @@
 ---
 - name: Import prerequisites tasks
   ansible.builtin.import_tasks: prerequisites.yml
+# Before the collector, so the snapshot directory it reads already exists.
+- name: Import SSH state tasks
+  ansible.builtin.import_tasks: ssh_state.yml
+  when: otel_ssh_monitoring_enabled | bool
 - name: Import opentelemetry tasks
   ansible.builtin.import_tasks: opentelemetry.yml
 

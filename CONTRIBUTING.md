@@ -18,10 +18,8 @@ Install the full `ansible` package, not bare `ansible-core`. The configuration i
 pip install ansible ansible-lint
 ```
 
-`ansible.cfg` already sets the inventory and `roles_path`, and disables
-privilege escalation (this branch is the no-sudo variant, see
-`docs/NO_SUDO_VARIANT.md`), so `-i` is optional. The documentation passes it
-explicitly for clarity. Do not add `become` to any task or play.
+`ansible.cfg` already sets the inventory, `roles_path`, and `become: sudo`, so
+`-i` is optional. The documentation passes it explicitly for clarity.
 
 ## Before you open a pull request
 
@@ -54,16 +52,10 @@ If you cannot test on a Mac, say so in the pull request. A change that has only
 been syntax-checked is still welcome, but it must be labelled as such so it is
 not mistaken for verified work.
 
-Because this variant needs no sudo, you can run the whole playbook against
-your own Mac: one host in each inventory group with `ansible_connection:
-local`, plus `-e` overrides for `base_dir`, `launch_agents_dir`,
-`victoriametrics_port` and `grafana_port` pointing at scratch paths and spare
-ports. Boot the `com.observability.*` labels out of `user/$(id -u)` afterwards.
-
-What still needs physical Mac Minis: deployment over SSH, LaunchAgents
-surviving the end of the SSH session, and behaviour across reboots. Do not
-describe any of them as working in a pull request or in documentation unless
-you have actually run them.
+Service lifecycle is the one area that cannot be validated off real hardware.
+launchd bootstrap, `KeepAlive`, restart behaviour, and running as root under
+launchd all need physical Macs. Do not describe any of them as working in a
+pull request or in documentation unless you have actually run them.
 
 ## Conventions worth knowing
 

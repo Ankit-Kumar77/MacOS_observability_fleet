@@ -4,8 +4,7 @@ galaxy_info:
   author: MacOS observability fleet
   description: >-
     Shared building blocks for the observability roles: the directory layout,
-    the versioned-archive install flow, the no-sudo preflight checks, and the
-    per-user LaunchAgent plist template.
+    the versioned-archive install flow, and the launchd daemon plist template.
   license: MIT
   min_ansible_version: "2.15"
   platforms:

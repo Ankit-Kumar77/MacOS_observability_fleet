@@ -12,14 +12,6 @@
   delegate_to: localhost
   become: false
 
-- name: Run no-sudo preflight checks
-  ansible.builtin.include_role:
-    name: observability_common
-    tasks_from: preflight
-  vars:
-    observability_system_daemon_labels:
-      - com.observability.otelcol
-
 - name: Create the observability directory layout
   ansible.builtin.include_role:
     name: observability_common

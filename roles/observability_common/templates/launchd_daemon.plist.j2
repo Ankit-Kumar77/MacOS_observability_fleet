@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 {#-
-  Shared per-user LaunchAgent plist for all observability services.
+  Shared LaunchDaemon plist for all observability services.
 
   Rendered from the calling role, which owns the notify/handler pairing:
 
     - name: Generate the VictoriaMetrics launchd plist
       ansible.builtin.template:
-        src: "{{ role_path }}/../observability_common/templates/launchd_agent.plist.j2"
-        dest: "{{ launch_agents_dir }}/com.observability.victoriametrics.plist"
+        src: "{{ role_path }}/../observability_common/templates/launchd_daemon.plist.j2"
+        dest: /Library/LaunchDaemons/com.observability.victoriametrics.plist
       vars:
         launchd_label: com.observability.victoriametrics
         launchd_program_arguments: [...]
@@ -15,15 +15,11 @@
         launchd_stderr_log: ...
 
   Required: launchd_label, launchd_program_arguments (list),
-            launchd_stdout_log, launchd_stderr_log, launchd_domain_type.
+            launchd_stdout_log, launchd_stderr_log.
   Optional: launchd_working_directory.
-
-  LimitLoadToSessionType is load-bearing. A plist without it defaults to the
-  Aqua (GUI login) session type, and launchd refuses to bootstrap it into the
-  user/<uid> domain without root ("Bootstrap failed: 5: Input/output error").
-  Background is what lets an unprivileged user load it into user/<uid> over
-  SSH; it also stops launchd loading a second copy into gui/<uid> when someone
-  logs in at the console. Aqua is used only when launchd_domain_type is gui.
+            launchd_start_interval (seconds): run the program periodically
+            instead of keeping it alive, for short-lived jobs such as
+            com.observability.sshstate.
 
   Values are XML-escaped; program arguments are operator-supplied and may
   legitimately contain characters that are significant in XML.
@@ -33,8 +29,6 @@
 <dict>
     <key>Label</key>
     <string>{{ launchd_label | e }}</string>
-    <key>LimitLoadToSessionType</key>
-    <string>{{ 'Aqua' if launchd_domain_type == 'gui' else 'Background' }}</string>
 {% if launchd_working_directory | default('') %}
     <key>WorkingDirectory</key>
     <string>{{ launchd_working_directory | e }}</string>
@@ -47,8 +41,13 @@
     </array>
     <key>RunAtLoad</key>
     <true/>
+{% if launchd_start_interval | default('') %}
+    <key>StartInterval</key>
+    <integer>{{ launchd_start_interval | int }}</integer>
+{% else %}
     <key>KeepAlive</key>
     <true/>
+{% endif %}
     <key>StandardErrorPath</key>
     <string>{{ launchd_stderr_log | e }}</string>
     <key>StandardOutPath</key>

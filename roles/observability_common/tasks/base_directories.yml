@@ -1,11 +1,5 @@
 ---
-# Creates the user-owned observability layout (default
-# ~/tools/observability) shared by both roles, plus the user's
-# ~/Library/LaunchAgents if it does not exist yet.
-#
-# Everything is created as the connecting Ansible user -- there is no become
-# anywhere in this variant -- so no owner/group is set: the files simply
-# belong to whoever deploys them.
+# Creates the /opt/observability layout shared by both roles.
 #
 # Callers may pass observability_extra_directories with any role-specific paths
 # to create alongside the base layout, for example:
@@ -24,19 +18,7 @@
   ansible.builtin.file:
     path: "{{ item }}"
     state: directory
+    owner: root
+    group: wheel
     mode: '0755'
-  loop: "{{ [base_dir, bin_dir, etc_dir, var_dir, log_dir, download_dir] + (observability_extra_directories | default([])) }}"
-
-# ~/Library/LaunchAgents usually exists already, often as 0700. It is only
-# created when missing, so an existing directory's mode is never changed.
-- name: Check for the user's LaunchAgents directory
-  ansible.builtin.stat:
-    path: "{{ launch_agents_dir }}"
-  register: observability_launch_agents_dir
-
-- name: Create the user's LaunchAgents directory
-  ansible.builtin.file:
-    path: "{{ launch_agents_dir }}"
-    state: directory
-    mode: '0700'
-  when: not observability_launch_agents_dir.stat.exists
+  loop: "{{ [base_dir, bin_dir, etc_dir, var_dir, log_dir] + (observability_extra_directories | default([])) }}"

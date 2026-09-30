@@ -7,7 +7,7 @@
     observability_archive_component: Grafana
     observability_archive_url: "{{ grafana_download_url }}"
     observability_archive_checksum: "{{ grafana_checksum }}"
-    observability_archive_tmp_path: "{{ download_dir }}/grafana-{{ grafana_version }}.tar.gz"
+    observability_archive_tmp_path: "/tmp/grafana-{{ grafana_version }}.tar.gz"
     observability_archive_install_dir: "{{ grafana_install_dir }}"
     observability_archive_binary_path: "{{ grafana_install_dir }}/bin/grafana"
     # The Grafana tarball nests everything under a grafana-<version>/ prefix.
@@ -21,6 +21,8 @@
     src: "{{ grafana_install_dir }}"
     dest: "{{ grafana_home }}"
     state: link
+    owner: root
+    group: wheel
     follow: false
     force: true
   notify: Restart Grafana
@@ -30,6 +32,8 @@
   ansible.builtin.template:
     src: grafana.ini.j2
     dest: "{{ etc_dir }}/grafana/grafana.ini"
+    owner: root
+    group: wheel
     mode: '0600'
   no_log: true
   notify: Restart Grafana
@@ -39,6 +43,8 @@
   ansible.builtin.template:
     src: datasource.yml.j2
     dest: "{{ etc_dir }}/grafana/provisioning/datasources/victoriametrics.yml"
+    owner: root
+    group: wheel
     mode: '0600'
   no_log: "{{ victoriametrics_auth_enabled }}"
   notify: Restart Grafana
@@ -47,6 +53,8 @@
   ansible.builtin.template:
     src: dashboard_provider.yml.j2
     dest: "{{ etc_dir }}/grafana/provisioning/dashboards/provider.yml"
+    owner: root
+    group: wheel
     mode: '0644'
   notify: Restart Grafana
 
@@ -54,6 +62,8 @@
   ansible.builtin.template:
     src: dashboard.json.j2
     dest: "{{ etc_dir }}/grafana/provisioning/dashboards/mac_minis.json"
+    owner: root
+    group: wheel
     mode: '0644'
   notify: Restart Grafana
 
@@ -62,13 +72,17 @@
   ansible.builtin.template:
     src: dashboard_detail.json.j2
     dest: "{{ etc_dir }}/grafana/provisioning/dashboards/mac_mini_detail.json"
+    owner: root
+    group: wheel
     mode: '0644'
   notify: Restart Grafana
 
 - name: Generate Grafana launchd plist
   ansible.builtin.template:
-    src: "{{ role_path }}/../observability_common/templates/launchd_agent.plist.j2"
-    dest: "{{ launch_agents_dir }}/com.observability.grafana.plist"
+    src: "{{ role_path }}/../observability_common/templates/launchd_daemon.plist.j2"
+    dest: /Library/LaunchDaemons/com.observability.grafana.plist
+    owner: root
+    group: wheel
     mode: '0644'
   vars:
     launchd_label: com.observability.grafana
@@ -84,4 +98,4 @@
     tasks_from: launchd_ensure_started
   vars:
     launchd_service_label: com.observability.grafana
-    launchd_service_plist: "{{ launch_agents_dir }}/com.observability.grafana.plist"
+    launchd_service_plist: /Library/LaunchDaemons/com.observability.grafana.plist

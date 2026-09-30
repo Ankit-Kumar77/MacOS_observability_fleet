@@ -5,6 +5,12 @@
     with an All value of .*, so "All" keeps the fleet-wide view. -#}
 {% set ds = {"type": "prometheus", "uid": "victoriametrics"} %}
 {% set detail_url = "/d/" ~ grafana_detail_dashboard_uid %}
+{% set host_links = [{"title": "Open ${__value.raw} in Mac Mini Detail", "url": detail_url ~ "?var-host_name=${__value.raw:percentencode}&${__url_time_range}"}] %}
+{#- A session series lingers in instant queries for the lookback window after
+    the session ends. Every series in one snapshot shares one timestamp, so a
+    session is current only if its latest sample is as new as its host's
+    latest ssh_sessions sample. -#}
+{% set live_sessions = 'ssh_session_start_time_seconds{host_name=~\\"$host_name\\"} and on (host_name, ssh_session_id) (timestamp(ssh_session_start_time_seconds{host_name=~\\"$host_name\\"}) >= on (host_name) group_left () timestamp(ssh_sessions{host_name=~\\"$host_name\\"}))' %}
 {% set series_links = [{"title": "Open ${__field.labels.host_name} in Mac Mini Detail", "url": detail_url ~ "?var-host_name=${__field.labels.host_name:percentencode}&${__url_time_range}"}] %}
 {
   "uid": "{{ grafana_fleet_dashboard_uid }}",
@@ -268,6 +274,99 @@
       "transformations": [
         {"id": "merge", "options": {}},
         {"id": "organize", "options": {"excludeByName": {"Time": true}, "indexByName": {"host_name": 0, "Value #A": 1, "Value #B": 2, "Value #C": 3, "Value #D": 4, "Value #E": 5}}}
+      ]
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "SSH Access",
+      "description": "Per Mac: Remote Login is the launchd sshd job being loaded; SSH Service is sshd answering with an SSH protocol banner on loopback (launchd holds port 22 open even when sshd itself is broken, so an open port alone is not proof); Sessions counts authenticated SSH connections. Refreshed every otel_ssh_check_interval by com.observability.sshstate.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 0, "y": 34, "w": 24, "h": 8},
+      "options": {"showHeader": true, "cellHeight": "sm", "sortBy": [{"displayName": "Mac Mini", "desc": false}]},
+      "fieldConfig": {
+        "defaults": {"custom": {"align": "auto"}},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "host_name"}, "properties": [{"id": "displayName", "value": "Mac Mini"}, {"id": "links", "value": {{ host_links | tojson }}}]},
+          {"matcher": {"id": "byName", "options": "Value #A"}, "properties": [{"id": "displayName", "value": "Remote Login"}, {"id": "custom.cellOptions", "value": {"type": "color-text"}}, {"id": "mappings", "value": [{"type": "value", "options": {"0": {"text": "Off", "color": "orange"}, "1": {"text": "On", "color": "green"}}}]}]},
+          {"matcher": {"id": "byName", "options": "Value #B"}, "properties": [{"id": "displayName", "value": "SSH Service"}, {"id": "custom.cellOptions", "value": {"type": "color-background"}}, {"id": "mappings", "value": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}]},
+          {"matcher": {"id": "byName", "options": "Value #C"}, "properties": [{"id": "displayName", "value": "Port"}, {"id": "custom.cellOptions", "value": {"type": "color-text"}}, {"id": "mappings", "value": [{"type": "value", "options": {"0": {"text": "Closed", "color": "red"}, "1": {"text": "Listening", "color": "green"}}}]}]},
+          {"matcher": {"id": "byName", "options": "Value #D"}, "properties": [{"id": "displayName", "value": "Sessions"}, {"id": "unit", "value": "none"}, {"id": "decimals", "value": 0}]}
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "max by (host_name) (ssh_remote_login_enabled{host_name=~\"$host_name\"})",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "datasource": {{ ds | tojson }},
+          "expr": "max by (host_name) (ssh_service_up{host_name=~\"$host_name\"})",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "C",
+          "datasource": {{ ds | tojson }},
+          "expr": "max by (host_name) (ssh_port_listening{host_name=~\"$host_name\"})",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "D",
+          "datasource": {{ ds | tojson }},
+          "expr": "max by (host_name) (ssh_sessions{host_name=~\"$host_name\"})",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {"id": "merge", "options": {}},
+        {"id": "organize", "options": {"excludeByName": {"Time": true}, "indexByName": {"host_name": 0, "Value #B": 1, "Value #C": 2, "Value #D": 3, "Value #A": 4}}}
+      ]
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "Current SSH Sessions",
+      "description": "Live authenticated SSH sessions: user, source address, terminal (notty = scp, sftp or a remote command) and login time. Only the fields shown are collected; nothing from inside the session is recorded.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 0, "y": 42, "w": 24, "h": 8},
+      "options": {"showHeader": true, "cellHeight": "sm", "sortBy": [{"displayName": "Mac Mini", "desc": false}]},
+      "fieldConfig": {
+        "defaults": {"custom": {"align": "auto"}},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "host_name"}, "properties": [{"id": "displayName", "value": "Mac Mini"}, {"id": "links", "value": {{ host_links | tojson }}}]},
+          {"matcher": {"id": "byName", "options": "user_name"}, "properties": [{"id": "displayName", "value": "User"}]},
+          {"matcher": {"id": "byName", "options": "source_address"}, "properties": [{"id": "displayName", "value": "Source"}]},
+          {"matcher": {"id": "byName", "options": "ssh_session_tty"}, "properties": [{"id": "displayName", "value": "Terminal"}]},
+          {"matcher": {"id": "byName", "options": "Value #A"}, "properties": [{"id": "displayName", "value": "Logged in"}, {"id": "unit", "value": "dateTimeAsLocal"}]},
+          {"matcher": {"id": "byName", "options": "Value #B"}, "properties": [{"id": "displayName", "value": "Duration"}, {"id": "unit", "value": "dtdurations"}]}
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "({{ live_sessions }}) * 1000",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "datasource": {{ ds | tojson }},
+          "expr": "time() - ({{ live_sessions }})",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {"id": "merge", "options": {}},
+        {"id": "organize", "options": {"excludeByName": {"Time": true, "os_type": true, "ssh_session_id": true}, "indexByName": {"host_name": 0, "user_name": 1, "source_address": 2, "ssh_session_tty": 3, "Value #A": 4, "Value #B": 5}}}
       ]
     }
   ]

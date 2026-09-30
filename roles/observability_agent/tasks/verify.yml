@@ -13,6 +13,14 @@
   changed_when: false
   tags: ['verify']
 
+# RunAtLoad runs the script as soon as launchd loads it; allow two intervals.
+- name: Wait for the first SSH state snapshot
+  ansible.builtin.wait_for:
+    path: "{{ otel_ssh_state_dir }}/ssh-state.json"
+    timeout: "{{ (otel_ssh_check_interval | int) * 2 + 10 }}"
+  when: otel_ssh_monitoring_enabled | bool
+  tags: ['verify']
+
 # End-to-end check: the collector was just restarted, so allow a couple of
 # collection intervals before expecting data to have landed.
 - name: Wait for host metrics to arrive in VictoriaMetrics

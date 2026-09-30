@@ -15,7 +15,9 @@
 #   observability_archive_component     Human-readable name, used in task names.
 #   observability_archive_url           Release URL.
 #   observability_archive_checksum      "sha256:..." from the upstream publisher.
-#   observability_archive_tmp_path      Where to stage the download.
+#   observability_archive_tmp_path      Where to stage the download. Callers
+#                                       use the user-owned download_dir, not
+#                                       the shared /tmp.
 #   observability_archive_install_dir   Versioned destination directory.
 #   observability_archive_binary_path   Absolute path of the binary to verify.
 #
@@ -48,9 +50,7 @@
     url: "{{ observability_archive_url }}"
     dest: "{{ observability_archive_tmp_path }}"
     checksum: "{{ observability_archive_checksum }}"
-    owner: root
-    group: wheel
-    mode: '0644'
+    mode: '0600'
   environment: "{{ proxy_env }}"
   when: not observability_archive_preinstalled.stat.exists
 
@@ -58,8 +58,6 @@
   ansible.builtin.file:
     path: "{{ observability_archive_install_dir }}"
     state: directory
-    owner: root
-    group: wheel
     mode: '0755'
   when: not observability_archive_preinstalled.stat.exists
 
@@ -77,20 +75,20 @@
   register: observability_archive_extract
   when: not observability_archive_preinstalled.stat.exists
 
-# tar run as root restores whatever owner/group is baked into the archive,
-# which is not guaranteed to be root:wheel, so normalize it explicitly --
-# unarchive did this itself via its owner/group parameters.
+# Run as the deployment user, tar cannot restore foreign owners, so the files
+# already belong to that user. What it can carry over is permission bits from
+# the archive, so strip group/other write to keep the binaries writable only
+# by their owner.
 #
 # no-handler is suppressed rather than obeyed: this is a filesystem fixup for
 # the extraction two tasks up, not a service action, and it has to complete
 # before the stat/assert below. A handler would fire at the end of the play,
 # long after those checks. This file is also a reusable include with no
 # handlers of its own, so there is nowhere correct to put one.
-- name: Normalize ownership of the extracted release for {{ observability_archive_component }} # noqa: no-handler
+- name: Normalize permissions of the extracted release for {{ observability_archive_component }} # noqa: no-handler
   ansible.builtin.file:
     path: "{{ observability_archive_install_dir }}"
-    owner: root
-    group: wheel
+    mode: go-w
     recurse: true
   when: observability_archive_extract is changed
 

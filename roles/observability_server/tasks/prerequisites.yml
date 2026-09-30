@@ -1,4 +1,13 @@
 ---
+- name: Run no-sudo preflight checks
+  ansible.builtin.include_role:
+    name: observability_common
+    tasks_from: preflight
+  vars:
+    observability_system_daemon_labels:
+      - com.observability.victoriametrics
+      - com.observability.grafana
+
 # NOTE: {{ grafana_home }} is deliberately absent from the directory list. It is
 # created as a symlink to the versioned Grafana install directory in grafana.yml,
 # and ansible.builtin.file will refuse to replace a real directory with a symlink.

@@ -1,12 +1,17 @@
 ---
+# No-sudo variant: every play runs as the connecting user. See
+# docs/NO_SUDO_VARIANT.md for how this differs from the system-level
+# (sudo) deployment on main.
 - name: Configure observability server
   hosts: monitoring_server
   tags: ['server', 'observability']
+  become: false
   roles:
     - observability_server
 
 - name: Configure observability agents
   hosts: monitored_nodes
   tags: ['agent', 'observability']
+  become: false
   roles:
     - observability_agent

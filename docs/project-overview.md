@@ -44,14 +44,15 @@ VictoriaMetrics stores the metrics. Grafana uses VictoriaMetrics as its datasour
 
 ## Operational notes
 
-- Software is installed under `/opt/observability`.
-- Services use the existing macOS launchd approach and plists are installed in `/Library/LaunchDaemons`.
+- No-sudo variant: software is installed under the deployment user's `~/tools/observability`, owned by that user; no sudo/admin rights are needed.
+- Services are per-user launchd LaunchAgents with plists in `~/Library/LaunchAgents`, loaded into the user's `user/<uid>` domain. Unlike root LaunchDaemons they are not started at boot; see [NO_SUDO_VARIANT.md](NO_SUDO_VARIANT.md).
+- SSH observability is not part of this variant.
 - The collector validates its rendered configuration during the agent verification tasks.
 - VictoriaMetrics and Grafana health endpoints are checked during server verification tasks.
 - There is no Prometheus server or Prometheus-specific Collector component in this design.
 
 ## Security and validation
 
-Keep credentials in Ansible Vault or another approved secret store. Restrict SSH access, sudo access, and network exposure of ports 8428 and 3000.
+Keep credentials in Ansible Vault or another approved secret store. Restrict SSH access and network exposure of ports 8428 and 3000. The deployment user needs no sudo rights.
 
 Static repository validation covers YAML, Jinja templates, plist XML, dashboard JSON, and SVG syntax. Actual macOS archive execution, launchd behavior, network policy, and end-to-end metric ingestion require validation on the first physical Mac Mini.

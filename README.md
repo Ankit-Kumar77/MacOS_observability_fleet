@@ -1,33 +1,51 @@
-# Mac Mini Observability
+# Mac Mini Observability: LaunchAgent / no-sudo variant
 
 Ansible automation for host-metric observability on Apple Silicon Mac Minis. One monitoring Mac Mini runs VictoriaMetrics and Grafana; every monitored Mac Mini runs an OpenTelemetry Collector.
+
+> **This branch is the LaunchAgent / no-sudo variant of `main`.** It deploys the same stack with **no sudo and no administrator rights**. Everything installs under the deployment user's home (`~/tools/observability`) and runs as **per-user LaunchAgents** (`~/Library/LaunchAgents`, launchd domain `user/<uid>`), not as root LaunchDaemons. Ansible still connects over normal SSH. Per-user agents **do not start at boot**, and the SSH session data an unprivileged collector can see is partial. Read [docs/LAUNCHAGENT_VARIANT.md](docs/LAUNCHAGENT_VARIANT.md) before relying on this for unattended monitoring.
 
 ## Architecture
 
 ![Mac Mini observability architecture](docs/architecture.svg)
 
-The metric path is:
+The metric path is unchanged from `main`:
 
 `hostmetrics + tcp_check + SSH state -> resourcedetection -> batch -> otlphttp -> VictoriaMetrics -> Grafana`
 
-`tcp_check` measures TCP connect latency from each Mac to VictoriaMetrics on the monitoring Mac. Grafana provisions two dashboards: **Mac Mini Fleet Overview** (all hosts, with a **Mac Mini** selector) and **Mac Mini Detail** (one reusable per-host dashboard, opened by clicking a host on the fleet dashboard).
+- `hostmetrics` collects CPU, memory, disk, filesystem, network and load.
+- `tcp_check` measures TCP connect latency from each Mac to VictoriaMetrics on the monitoring Mac.
+- SSH state is collected by a per-user LaunchAgent, `com.observability.user.sshstate`, every 30 s, and read through the collector's `otlp_json_file` receiver. It records whether Remote Login is on, whether port 22 is listening, whether sshd answers, and each SSH session it can attribute (user, source address, terminal, login time), plus the count of established SSH connections. Nothing from inside a session is recorded.
+- Grafana provisions two dashboards: **Mac Mini Fleet Overview** (all hosts, with a multi-select **Mac Mini** selector) and **Mac Mini Detail** (one reusable per-host dashboard, opened by clicking a host on the fleet dashboard).
 
-SSH access state is collected by a root LaunchDaemon, `com.observability.sshstate`, that runs every 30 s. It records whether Remote Login is on, whether port 22 is listening, whether sshd actually answers, and each live SSH session's user, source address, terminal and login time. Nothing from inside a session is recorded. The collector reads it through its `otlp_json_file` receiver. Both dashboards have SSH panels.
+Each collector sends OTLP/HTTP to `http://<monitoring-server-address>:<victoriametrics_port>/opentelemetry/v1/metrics`. There is no Prometheus server and no node_exporter.
 
-Each collector sends OTLP/HTTP to `http://<monitoring-server-address>:8428/opentelemetry/v1/metrics`. There is no Prometheus server or Prometheus-specific Collector component in this design.
+| Role | Target | Runs as LaunchAgents |
+| --- | --- | --- |
+| `observability_server` | `monitoring_server` (exactly one Mac) | `com.observability.user.victoriametrics`, `com.observability.user.grafana` |
+| `observability_agent` | `monitored_nodes` (any number, 20+ fine) | `com.observability.user.otelcol`, `com.observability.user.sshstate` |
+
+### Differences from `main`
+
+| | `main` | This branch |
+| --- | --- | --- |
+| Privilege | sudo (`--ask-become-pass`) | none: `become = False`, preflight fails on root |
+| Services | root LaunchDaemons, `/Library/LaunchDaemons`, `system` domain | per-user LaunchAgents, `~/Library/LaunchAgents`, `user/<uid>` domain |
+| Install root | `/opt/observability` (`root:wheel`) | `~/tools/observability` (deployment user) |
+| Starts at boot | yes | no: re-run the play after a reboot, or use `launchd_domain_type: gui` with auto-login |
+| SSH sessions | all sessions (root `lsof`) | sessions attributable without root, plus a new `ssh_connections` total; see the [capability matrix](docs/LAUNCHAGENT_VARIANT.md#ssh-observability-capability-matrix) |
+| Side-by-side with the system stack | n/a | opt-in `observability_side_by_side` (8429 / 3001) |
 
 ## Before deployment
 
 You need:
 
-- A control machine with Ansible installed and network access to the target Macs.
-- Apple Silicon Macs running macOS, with SSH enabled.
-- An Ansible SSH user on every Mac with sudo permission.
+- A control machine with the full `ansible` package (not bare `ansible-core`: `ansible.cfg` uses the `yaml` callback from `community.general`).
+- Apple Silicon Macs running macOS with Remote Login (SSH) enabled for the deployment user. **No sudo or admin rights are required on any Mac.**
 - One Mac selected as the monitoring server and at least one separate Mac selected as a monitored node.
-- The hostname or reachable address, SSH user, and SSH authentication method for each Mac.
-- Network access from monitored Macs to the monitoring Mac on port `8428`; browser access to Grafana on port `3000` as required.
+- The reachable address, SSH user and SSH authentication method for each Mac.
+- Network access from monitored Macs to the monitoring Mac on `victoriametrics_port` (`8428`, or `8429` in side-by-side mode), and browser access to Grafana on `grafana_port` (`3000`, or `3001`).
 
-Use SSH keys where possible. Confirm connectivity before deployment:
+Use SSH keys where possible. Confirm connectivity:
 
 ```bash
 ansible all -i inventories/production/hosts.yml -m ping
@@ -52,142 +70,152 @@ all:
           ansible_user: <ssh-user>
 ```
 
-The agents derive `monitoring_server_address` from the monitoring-server inventory entry. Do not put real production addresses or credentials in source-controlled variable files.
+The agents derive `monitoring_server_address` from the monitoring-server inventory entry. Do not put real addresses or credentials in source-controlled files.
 
-## First-time setup: one monitoring Mac and one agent Mac
+## Deploy (no sudo)
 
-Start with one of each. Do not scale out until this flow succeeds on physical Macs.
+The whole fleet, both plays:
 
-1. **Prepare the monitoring Mac.** Confirm SSH and sudo access, and ensure ports `8428` and `3000` are available.
-2. **Configure inventory.** Add the monitoring Mac and one agent as shown above.
-3. **Secrets (optional).** No vault is required by default: `victoriametrics_auth_enabled: false` in `inventories/production/group_vars/all.yml`, and `grafana_admin_password` in `inventories/production/group_vars/monitoring_server.yml` is a plain, checked-in default (`admin`). This is meant for local/testing use — anyone who can reach port `8428` can read, write, or delete fleet metrics unauthenticated, and Grafana logs in with the default credentials.
+```bash
+ansible-playbook -i inventories/production/hosts.yml site.yml
+```
 
-   For anything beyond that, set real credentials, plain or vaulted:
+There is no `--ask-become-pass` and no `-b` on this branch; passing `--become` makes preflight fail on purpose.
 
-   ```bash
-   ansible-vault encrypt_string 'replace-with-a-strong-password' --name 'vault_grafana_admin_password'
-   ansible-vault encrypt_string 'replace-with-a-strong-password' --name 'vault_victoriametrics_password'
-   ```
+Staged, one of each first:
 
-   Set `grafana_admin_password: "{{ vault_grafana_admin_password }}"` and, if enabling VictoriaMetrics auth, `victoriametrics_auth_enabled: true` plus `victoriametrics_auth_password: "{{ vault_victoriametrics_password }}"`. Both the collector on every monitored Mac and the Grafana datasource are rendered with the VictoriaMetrics credentials, so all three must be deployed from the same source. Add `--ask-vault-pass` to the commands below if you vault either secret.
-4. **Run the server setup.**
+```bash
+# 1. Monitoring Mac
+ansible-playbook -i inventories/production/hosts.yml site.yml --tags server
 
-   ```bash
-   ansible-playbook -i inventories/production/hosts.yml site.yml --tags server --ask-become-pass
-   ```
-5. **Verify VictoriaMetrics.** On the monitoring Mac, check `http://localhost:8428/health` and review `/opt/observability/var/log/victoriametrics.err.log` if it does not respond. `/health` is deliberately exempt from authentication. If you enabled auth, query endpoints are not exempt, so `curl -u observability:<password> http://localhost:8428/api/v1/labels` is the check that credentials are working, and an unauthenticated query correctly returns `401`.
-6. **Verify Grafana.** Open `http://<monitoring-mac-address>:3000`, sign in with the configured password, and confirm the VictoriaMetrics datasource is present.
-7. **Prepare the agent Mac.** Confirm SSH/sudo access and that it can reach the monitoring Mac on port `8428`.
-8. **Run the agent setup.** Replace the limit with your agent inventory alias.
+# 2. One worker
+ansible-playbook -i inventories/production/hosts.yml site.yml --tags agent --limit agent-mac-01
 
-   ```bash
-   ansible-playbook -i inventories/production/hosts.yml site.yml --limit agent-mac-01 --tags agent --ask-become-pass
-   ```
-9. **Verify the collector.** On the agent, run:
+# 3. The rest of the fleet
+ansible-playbook -i inventories/production/hosts.yml site.yml --tags agent
 
-   ```bash
-   sudo /opt/observability/bin/otelcol-contrib validate --config=/opt/observability/etc/otel-config.yaml
-   ```
+# Verification tasks only
+ansible-playbook -i inventories/production/hosts.yml site.yml --tags verify
+```
 
-   Then review `/opt/observability/var/log/otelcol.err.log` if needed.
-10. **Verify end-to-end metrics.** Confirm VictoriaMetrics remains healthy, then open the provisioned Grafana dashboard and check that the agent host appears.
+Each role runs `preflight` → install/configure → `flush_handlers` → `verify`. Verification checks that the LaunchAgents are running in the per-user domain, that VictoriaMetrics and Grafana are healthy, the datasource and both dashboards are provisioned (server), and that the collector config validates and this Mac's metrics reach VictoriaMetrics (agent).
 
-## Scale to N Mac Minis
+If a Mac can reach GitHub only through a proxy, pass `proxy_env`:
 
-After the first monitoring-and-agent test works:
+```bash
+ansible-playbook -i inventories/production/hosts.yml site.yml --tags server \
+  -e '{"proxy_env":{"http_proxy":"http://127.0.0.1:9000","https_proxy":"http://127.0.0.1:9000"}}'
+```
 
-1. Add each additional Mac to `monitored_nodes` in the inventory, using its own placeholder-replaced address and SSH user.
-2. Apply the same agent role to all monitored nodes:
+### After deployment
 
-   ```bash
-   ansible-playbook -i inventories/production/hosts.yml site.yml --tags agent --ask-become-pass
-   ```
-3. Target one host during troubleshooting or staged rollout:
+1. On the monitoring Mac: `curl http://localhost:8428/health` (or `:8429`). Logs are in `~/tools/observability/var/log/victoriametrics.err.log`.
+2. Open `http://<monitoring-mac-address>:3000` (or `:3001`), sign in as `admin` with `grafana_admin_password`, and open **Mac Mini Fleet Overview**.
+3. On a worker: `~/tools/observability/bin/otelcol-contrib validate --config=$HOME/tools/observability/etc/otel-config.yaml` and `~/tools/observability/var/log/otelcol.err.log`.
 
-   ```bash
-   ansible-playbook -i inventories/production/hosts.yml site.yml --limit agent-mac-02 --tags agent --ask-become-pass
-   ```
-4. Check the Grafana fleet dashboard for all hosts.
+### After a reboot
 
-The `observability_agent` role is reused unchanged for any number of monitored Mac Minis, including a fleet of approximately 40.
+Per-user LaunchAgents are not started at boot. Re-run the play for that Mac:
+
+```bash
+ansible-playbook -i inventories/production/hosts.yml site.yml --limit mac-mini-02 --tags agent
+```
+
+Or set `launchd_domain_type: gui` and enable auto-login for the deployment user so launchd starts the agents at login. The full lifecycle (login, logout, reboot, and what is unverified) is in [docs/LAUNCHAGENT_VARIANT.md](docs/LAUNCHAGENT_VARIANT.md#launchagent-lifecycle).
+
+## Side-by-side testing with the old system-level stack
+
+If the system-level deployment from `main` is still running on some Macs and you cannot remove it, run this stack beside it on alternate ports:
+
+```bash
+ansible-playbook -i inventories/production/hosts.yml site.yml -e observability_side_by_side=true
+```
+
+or set `observability_side_by_side: true` in `inventories/production/group_vars/all.yml`. VictoriaMetrics then listens on `8429`, Grafana on `3001`, and every collector exports to `8429`. Config and data live under `~/tools/observability`, and labels are `com.observability.user.*`. The old stack (`/opt/observability`, `/Library/LaunchDaemons`, `8428`/`3000`) is never stopped, unloaded or modified.
+
+Without the flag, preflight **fails** on any Mac where it finds the old LaunchDaemons, rather than run two copies on the same ports. Turn the flag off for a normal deployment once the old stack is gone, and re-run both plays. Details are in [docs/LAUNCHAGENT_VARIANT.md](docs/LAUNCHAGENT_VARIANT.md#side-by-side-testing-with-the-system-level-deployment).
+
+## Managing the services
+
+As the deployment user, no sudo:
+
+```bash
+launchctl print user/$(id -u)/com.observability.user.otelcol         # status
+launchctl kickstart -k user/$(id -u)/com.observability.user.otelcol  # restart
+launchctl bootout user/$(id -u)/com.observability.user.otelcol       # stop/unload
+launchctl bootstrap user/$(id -u) ~/Library/LaunchAgents/com.observability.user.otelcol.plist  # start/load
+```
+
+Re-running the play always restores the intended state. More commands and a diagnosis table: [docs/LAUNCHAGENT_VARIANT.md](docs/LAUNCHAGENT_VARIANT.md#operating-the-launchagents).
+
+## Secrets
+
+No vault is required by default: `victoriametrics_auth_enabled: false` in `inventories/production/group_vars/all.yml`, and `grafana_admin_password` in `inventories/production/group_vars/monitoring_server.yml` is a plain, checked-in default (`admin`). This is meant for local/testing use: anyone who can reach the VictoriaMetrics port can read, write or delete fleet metrics, and Grafana logs in with the default credentials.
+
+For anything beyond that, set real credentials, plain or vaulted:
+
+```bash
+ansible-vault encrypt_string 'replace-with-a-strong-password' --name 'vault_grafana_admin_password'
+ansible-vault encrypt_string 'replace-with-a-strong-password' --name 'vault_victoriametrics_password'
+```
+
+Set `grafana_admin_password: "{{ vault_grafana_admin_password }}"` and, to require auth on VictoriaMetrics, `victoriametrics_auth_enabled: true` plus `victoriametrics_auth_password: "{{ vault_victoriametrics_password }}"`. The collectors, the Grafana datasource and VictoriaMetrics are all rendered from the same credentials, so deploy all three from the same source, adding `--ask-vault-pass`. Credential-bearing files stay `0600` and their tasks are `no_log`. The VictoriaMetrics password is passed as `file://...`, never as an argument.
 
 ## Versions and macOS compatibility
 
 | Component | Version | Why this version matters |
 | --- | --- | --- |
-| OpenTelemetry Collector Contrib | `0.159.0` | **Minimum usable version on macOS.** In `0.98.0` the `hostmetrics` `cpu` and `disk` scrapers return `not implemented yet` on darwin and emit nothing, leaving the CPU and disk panels permanently empty. Do not downgrade without re-testing on a Mac. |
-| VictoriaMetrics | `1.101.0` | Runs with `-opentelemetry.usePrometheusNaming`. Without that flag it stores OTLP names verbatim (`system.memory.usage`, label `host.name`) and every dashboard query returns nothing. Confirmed present in `1.101.0`'s flag list; see "Validation limits" below for what has and hasn't been run end-to-end at this version. |
-| Grafana | `13.2.0` | Grafana 11+ removed the separate `grafana-server` binary; the launchd plist uses `grafana server` instead. |
+| OpenTelemetry Collector Contrib | `0.159.0` | **Minimum usable version on macOS.** In `0.98.0` the `hostmetrics` `cpu` and `disk` scrapers return `not implemented yet` on darwin. |
+| VictoriaMetrics | `1.101.0` | Runs with `-opentelemetry.usePrometheusNaming`; without it every dashboard query returns nothing. |
+| Grafana | `13.2.0` | Grafana 11+ removed `grafana-server`; the plist runs `grafana server`. |
 
-Versions, checksums and tuning are role defaults under
-`roles/<role>/defaults/main.yml`. Override them per environment in
-`inventories/production/group_vars/`. Every download is checksum-verified
-against the upstream-published SHA256, so a version bump also requires updating
-the matching `*_checksum` value.
-
-Each release installs into its own versioned directory with a stable symlink
-(`/opt/observability/bin/otelcol-contrib`, `.../victoria-metrics-prod`,
-`/opt/observability/grafana`), so upgrades are a symlink flip and the previous
-version stays on disk for rollback.
-
-## What the project installs
-
-| Role | Target | Installed/configured components |
-| --- | --- | --- |
-| `observability_server` | `monitoring_server` | VictoriaMetrics, Grafana, datasource/dashboard provisioning, launchd plists |
-| `observability_agent` | `monitored_nodes` | `otelcol-contrib`, host-metric pipeline, launchd plist |
-
-Software, configuration, data, and logs are placed under `/opt/observability`. The project uses the existing macOS launchd approach with plists in `/Library/LaunchDaemons`.
+Versions, checksums and tuning are role defaults under `roles/<role>/defaults/main.yml`. Every download is checksum-verified, so a version bump also needs the matching `*_checksum`. Each release installs into a versioned directory behind a stable symlink (`~/tools/observability/bin/otelcol-contrib`, `.../victoria-metrics-prod`, `~/tools/observability/grafana`), so upgrades are a symlink flip and old versions stay on disk for rollback.
 
 ## Troubleshooting
 
 | Problem | First checks |
 | --- | --- |
-| SSH or Ansible cannot connect | Confirm `ansible_host`, `ansible_user`, SSH keys, and `ansible all -m ping`. |
-| Collector does not start | Validate `/opt/observability/etc/otel-config.yaml`; inspect `otelcol.err.log`; confirm the collector binary exists. |
-| VictoriaMetrics does not start | Check the binary, port `8428`, and `victoriametrics.err.log`. |
-| Grafana does not start | Check the binary, port `3000`, configuration path, and `grafana.err.log`. |
-| Metrics do not appear | Check the collector log, agent-to-server access on `8428`, VictoriaMetrics health, then Grafana datasource/dashboard. |
-| launchd or plist issue | Use [LAUNCHD_TROUBLESHOOTING.md](LAUNCHD_TROUBLESHOOTING.md) for plist validation, service status, logs, and safe recovery commands. |
-| Incorrect path or port conflict | Compare the plist `ProgramArguments` with the files under `/opt/observability`; use `lsof` to identify a listener on ports `8428` or `3000`. |
+| Ansible cannot connect | `ansible_host`, `ansible_user`, SSH keys, `ansible all -m ping`. |
+| Preflight fails | Read the message. It names the cause: root/become, missing launchd domain, old system-level stack present, or a port in use. See [diagnosing failures](docs/LAUNCHAGENT_VARIANT.md#diagnosing-failures). |
+| An agent is not running | `launchctl print user/$(id -u)/<label>`, then `~/tools/observability/var/log/<service>.err.log`. |
+| Metrics do not appear | Collector log; from the worker, `curl http://<monitoring-mac>:<port>/health`; check side-by-side mode is set the same for server and workers. |
+| Worker missing after reboot | Expected; re-run the play for that host. |
+| Port conflict | `lsof -nP -iTCP:<port> -sTCP:LISTEN`; use side-by-side mode if it is the old stack. |
 
-## Security
+## Validation
 
-- Never commit real passwords, private keys, or credentials.
-- Use Ansible Vault for the Grafana password and any other secret values.
-- Keep inventory addresses environment-specific and avoid hard-coding production infrastructure into roles or templates.
-- Restrict SSH, sudo access, and network exposure of ports `8428` and `3000` to the required users and networks.
+**Static checks on this branch, all passing:** `ansible-playbook site.yml --syntax-check`, `ansible-inventory --list` and `ansible-lint` (production profile, 0 findings). The rendered dashboards are valid JSON, all four rendered plists pass `plutil -lint`, the rendered collector config passes `otelcol-contrib validate` (inside the verify tasks), and the rendered SSH script passes `sh -n`.
 
-## Validation limits
+**Run on one Apple Silicon Mac (macOS 27.0.1), as uid 501 with no sudo, over `ansible_connection: local`.** The inventory had one host per group, with scratch `base_dir`/`launch_agents_dir`, a test label prefix and spare ports:
 
-The **data path** has been validated on Apple Silicon by running the real
-binaries locally: collector `0.159.0` scraping `hostmetrics`, exporting OTLP/HTTP
-with basic auth into VictoriaMetrics `1.150.0`, and Grafana `13.2.0` rendering
-this project's provisioned datasource and dashboard. All six dashboard panels
-return data through Grafana's datasource proxy.
+| Check | Result |
+| --- | --- |
+| Full `site.yml`, both plays | `failed=0`. All four LaunchAgents loaded in `user/501` (VictoriaMetrics, Grafana and collector `state = running`; sshstate periodic, exit 0); none in `gui/501`. |
+| Second run | `changed=0`, no handlers fired. |
+| Ownership and modes | Every installed file is owned by the deployment user; `grafana.ini`, `otel-config.yaml` and the datasource are `0600`, `ssh-state/` is `0700`, nothing is world-writable, and archives are removed after extraction. |
+| Dashboards | Datasource uid `victoriametrics` points at the configured port. Every panel query on both dashboards, run through Grafana's datasource proxy, returns data, except **Current SSH Sessions** with Remote Login off (no sessions, as expected). |
+| SSH sessions end to end | With `otel_ssh_port` pointed at a test port held by a process titled `sshd-session: <user>@notty`, the session reached VictoriaMetrics with the correct `user_name`, `source_address`, `ssh_session_tty` and `ssh_session_id`, and both **Current SSH Sessions** tables returned it. |
+| Side-by-side mode | With fake old-stack plists present: VictoriaMetrics listened on 8429, Grafana on 3001, the datasource and collector targeted 8429, and only the services whose config changed restarted. |
+| Guards | Old stack present without side-by-side → preflight fails, names the plist. Side-by-side port equal to the old port → fails. Port already in use → fails, names the port, writes nothing. `--become` → ignored by the play's `become: false` (ran unprivileged, `changed=0`). `-e ansible_become=true` → Ansible's own sudo attempt fails at fact gathering, before any task runs. |
+| Domain switching | `launchd_domain_type: gui` → agents moved to `gui/501` with `Aqua`, no copy left in `user/501`. A re-run was `changed=0`. Switching back to `user` moved them back. |
 
-The pinned VictoriaMetrics default has since moved to `1.101.0` (to match an
-already-downloaded local archive) and has **not** been through this same
-end-to-end run — only confirmed to expose `-opentelemetry.usePrometheusNaming`
-in its flag list. Re-verify the dashboard panels after deploying with it.
+**Not yet tested on physical Mac Minis:**
 
-What that does **not** cover, and still requires physical Mac Minis:
+- Deployment over real SSH to remote Macs.
+- Whether `user/<uid>` agents survive the end of the SSH session that started them, a console logout/login, and a reboot (expected: not started at boot).
+- `launchd_domain_type: gui` with auto-login across a reboot.
+- SSH state against a real `com.openssh.sshd` with Remote Login on and sessions from several users. Enabling Remote Login needs an admin, so the session path was tested with a stand-in process, not real sshd.
+- Side-by-side mode against a real running system-level deployment (it was simulated with placeholder plists).
+- Network/firewall policy between Macs, and 20+ hosts at once.
 
-- launchd bootstrap, `KeepAlive`/`StartInterval` and restart behaviour for all four services.
-- SSH state against the system sshd with Remote Login on. The script was run on macOS 26 against a private loopback sshd with real sessions, but not against `com.openssh.sshd` itself.
-- Running as root under launchd rather than as a logged-in user.
-- File ownership (`root:wheel`) and the `0600` secret files at runtime.
-- Network and firewall policy between monitored Macs and the monitoring Mac.
-- Idempotency across repeated playbook runs on real hosts.
-
-This project must not be considered production-tested until the
-one-monitoring-Mac plus one-agent-Mac test succeeds on real hardware.
+Do not treat this branch as production-tested until a monitoring Mac plus one worker Mac succeed over SSH and survive a reboot cycle as documented.
 
 ## More documentation
 
+- [LaunchAgent / no-sudo variant](docs/LAUNCHAGENT_VARIANT.md): differences, lifecycle, SSH capability matrix, side-by-side mode, operations
 - [Project internal flow](docs/PROJECT_FLOW.md)
-- [Confluence-ready project overview](docs/project-overview.md)
-- [launchd troubleshooting](LAUNCHD_TROUBLESHOOTING.md)
+- [KT guide](docs/KT_GUIDE.md)
+- [Resource footprint](docs/RESOURCE_FOOTPRINT.md)
 - [Contributing guide](CONTRIBUTING.md)
 
 ## License

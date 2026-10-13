@@ -6,7 +6,7 @@
 #   - name: ...
 #     ansible.builtin.include_role:
 #       name: observability_common
-#       tasks_from: install_versioned_archive   # or base_directories
+#       tasks_from: install_versioned_archive   # or base_directories, preflight
 #
 # This entry point exists only so the role is well-formed, and intentionally
 # does nothing. See tasks/base_directories.yml and
@@ -14,6 +14,6 @@
 - name: Confirm observability_common is used as a library role
   ansible.builtin.debug:
     msg: >-
-      observability_common provides shared task files and the launchd plist
-      template. Include it with tasks_from rather than applying it directly.
+      observability_common provides shared task files and the LaunchAgent
+      plist template. Include it with tasks_from rather than applying it directly.
   when: false

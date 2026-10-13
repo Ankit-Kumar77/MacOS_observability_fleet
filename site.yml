@@ -1,12 +1,17 @@
 ---
+# LaunchAgent / no-sudo variant. Both plays run as the connecting SSH user and
+# install into that user's home; become is pinned off so a stray --become or
+# ansible.cfg change cannot turn this into a root deployment.
 - name: Configure observability server
   hosts: monitoring_server
+  become: false
   tags: ['server', 'observability']
   roles:
     - observability_server
 
 - name: Configure observability agents
   hosts: monitored_nodes
+  become: false
   tags: ['agent', 'observability']
   roles:
     - observability_agent

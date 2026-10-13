@@ -4,14 +4,35 @@
 # role's defaults. Everything else (paths, versions, ports, tuning) is a role
 # default under roles/<role>/defaults/main.yml and may be overridden here.
 
-victoriametrics_port: 8428
+# Side-by-side testing with the system-level (main branch) deployment.
+#
+# false (default): a clean deployment on the standard ports. Preflight fails
+#   if it finds the system-level LaunchDaemons on a Mac, rather than run two
+#   copies of the same service on the same ports.
+# true: the system-level stack (root LaunchDaemons, /opt/observability, ports
+#   8428/3000) is left running and untouched, and this LaunchAgent stack runs
+#   beside it on the ports below with its own labels, config and data under
+#   base_dir. Set it fleet-wide (here, or with -e) so every collector targets
+#   the same VictoriaMetrics port the monitoring Mac listens on.
+observability_side_by_side: false
+observability_side_by_side_victoriametrics_port: 8429
+observability_side_by_side_grafana_port: 3001
+
+# What the system-level deployment looks like, so preflight can detect it
+# (read-only) and keep side-by-side mode from colliding with it.
+observability_legacy_base_dir: /opt/observability
+observability_legacy_launch_daemons_dir: /Library/LaunchDaemons
+observability_legacy_victoriametrics_port: 8428
+observability_legacy_grafana_port: 3000
+
+victoriametrics_port: "{{ observability_side_by_side_victoriametrics_port if observability_side_by_side | bool else 8428 }}"
 
 # Derived from the single host in the monitoring_server group so that no real
 # address is ever committed to a role or template.
 monitoring_server_address: "{{ hostvars[groups['monitoring_server'][0]]['ansible_host'] }}"
 
 # VictoriaMetrics ships with no authentication: without this, anyone who can
-# reach port 8428 can read, write or delete fleet metrics. Basic auth covers
+# reach victoriametrics_port can read, write or delete fleet metrics. Basic auth covers
 # the query and OTLP-write endpoints; /health deliberately stays open so
 # readiness checks and external uptime probes keep working.
 victoriametrics_auth_enabled: false

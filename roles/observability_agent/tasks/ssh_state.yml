@@ -4,8 +4,6 @@
   ansible.builtin.file:
     path: "{{ otel_ssh_state_dir }}"
     state: directory
-    owner: root
-    group: wheel
     mode: '0700'
 
 # launchd starts a fresh copy of the script every interval, so a script change
@@ -14,29 +12,25 @@
   ansible.builtin.template:
     src: ssh_state.sh.j2
     dest: "{{ otel_ssh_state_program_arguments[0] }}"
-    owner: root
-    group: wheel
     mode: '0755'
 
-- name: Generate SSH state launchd plist
+- name: Generate SSH state LaunchAgent plist
   ansible.builtin.template:
-    src: "{{ role_path }}/../observability_common/templates/launchd_daemon.plist.j2"
-    dest: /Library/LaunchDaemons/com.observability.sshstate.plist
-    owner: root
-    group: wheel
+    src: "{{ role_path }}/../observability_common/templates/launchd_agent.plist.j2"
+    dest: "{{ otel_ssh_state_launchd_plist }}"
     mode: '0644'
   vars:
-    launchd_label: com.observability.sshstate
+    launchd_label: "{{ otel_ssh_state_launchd_label }}"
     launchd_program_arguments: "{{ otel_ssh_state_program_arguments }}"
     launchd_start_interval: "{{ otel_ssh_check_interval }}"
     launchd_stdout_log: "{{ log_dir }}/sshstate.out.log"
     launchd_stderr_log: "{{ log_dir }}/sshstate.err.log"
   notify: Restart SSH state collector
 
-- name: Ensure the SSH state collector is started and enabled
+- name: Ensure the SSH state collector is loaded in the per-user launchd domain
   ansible.builtin.include_role:
     name: observability_common
     tasks_from: launchd_ensure_started
   vars:
-    launchd_service_label: com.observability.sshstate
-    launchd_service_plist: /Library/LaunchDaemons/com.observability.sshstate.plist
+    launchd_service_label: "{{ otel_ssh_state_launchd_label }}"
+    launchd_service_plist: "{{ otel_ssh_state_launchd_plist }}"

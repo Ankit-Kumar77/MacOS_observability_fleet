@@ -2,9 +2,11 @@
 
 ## Overview
 
+> This is the **LaunchAgent / no-sudo** branch. Everything below runs as the connecting SSH user, installs under `~/tools/observability`, and is managed as per-user LaunchAgents in `user/<uid>`. See [LAUNCHAGENT_VARIANT.md](LAUNCHAGENT_VARIANT.md) for how this differs from the system-level `main` branch.
+
 This project automates host-metric observability for Apple Silicon Mac Minis. It has two applied Ansible roles: `observability_server` configures one monitoring Mac Mini, and `observability_agent` configures every monitored Mac Mini. The same agent role is reused as the fleet grows.
 
-A third role, `observability_common`, is a library rather than something applied to hosts. It holds the parts both roles would otherwise duplicate three times over: the `/opt/observability` directory layout, the download → checksum → versioned-extract → verify install flow, and one launchd plist template shared by all three daemons. Both roles pull these in with `ansible.builtin.include_role` and `tasks_from`.
+A third role, `observability_common`, is a library rather than something applied to hosts. It holds the parts both roles would otherwise duplicate three times over: the read-only preflight guards, the user-owned `~/tools/observability` directory layout, the download → checksum → versioned-extract → verify install flow, and one LaunchAgent plist template shared by all four services. Both roles pull these in with `ansible.builtin.include_role` and `tasks_from`.
 
 The shared install flow deliberately stops before creating the stable symlink and before notifying any restart handler. The symlink flip is the moment a service's running version actually changes, so it stays in the calling role beside the handler it triggers.
 
@@ -43,13 +45,14 @@ flowchart TD
     I[Inventory and group_vars] --> S[site.yml]
     S -->|monitoring_server| SR[observability_server]
     S -->|monitored_nodes| AR[observability_agent]
-    SR --> ST[Server templates and launchd plists]
-    AR --> AT[Collector config and launchd plist]
+    SR --> ST[Server templates and LaunchAgent plists]
+    AR --> AT[Collector config, SSH script and LaunchAgent plists]
     SR -.include_role.-> C[observability_common]
     AR -.include_role.-> C
     C --> CD[base_directories]
     C --> CI[install_versioned_archive]
-    C --> CP[launchd_daemon.plist.j2]
+    C --> CF[preflight]
+    C --> CP[launchd_agent.plist.j2]
 ```
 
 `site.yml` has one play for each inventory group. Tags allow the server play (`--tags server`) and agent play (`--tags agent`) to be run independently.
@@ -58,28 +61,28 @@ flowchart TD
 
 The `observability_server` role imports tasks in this order:
 
-1. `prerequisites.yml` creates `/opt/observability` directories for binaries, configuration, data, plugins, and logs.
-2. `victoriametrics.yml` writes the `0600` basic-auth password file, downloads and checksum-verifies the archive, extracts it into a versioned directory, repoints the `victoria-metrics-prod` symlink, renders its plist, and requests service start.
-3. `grafana.yml` extracts Grafana into a versioned directory, repoints the `/opt/observability/grafana` symlink, renders `grafana.ini`, provisions the VictoriaMetrics datasource and the fleet and detail dashboards, renders its plist, and requests service start.
+1. `prerequisites.yml` runs `preflight` (unprivileged user, per-user launchd domain present, no clash with a system-level deployment, ports free), then creates the user-owned `~/tools/observability` directories for binaries, configuration, data, plugins, downloads and logs.
+2. `victoriametrics.yml` writes the `0600` basic-auth password file, downloads and checksum-verifies the archive, extracts it into a versioned directory, repoints the `victoria-metrics-prod` symlink, renders its LaunchAgent plist, and bootstraps it into the per-user domain if not loaded.
+3. `grafana.yml` extracts Grafana into a versioned directory, repoints the `~/tools/observability/grafana` symlink, renders `grafana.ini`, provisions the VictoriaMetrics datasource and the fleet and detail dashboards, renders its LaunchAgent plist, and bootstraps it if not loaded.
 4. `flush_handlers` applies any pending restarts **before** verification, so the checks below see the configuration this run just produced rather than the previous one.
-5. `verify.yml` checks VictoriaMetrics health, that its query API accepts the configured credentials and rejects unauthenticated access, Grafana health, the Grafana datasource API, and that the fleet and detail dashboards were provisioned.
+5. `verify.yml` checks that both LaunchAgents report `state = running` in the per-user domain, VictoriaMetrics health, that its query API accepts the configured credentials and rejects unauthenticated access, Grafana health, the Grafana datasource API, and that the fleet and detail dashboards were provisioned.
 
-The VictoriaMetrics plist points to `/opt/observability/bin/victoria-metrics-prod`, stores data in `/opt/observability/var/victoriametrics`, logs under `/opt/observability/var/log`, and listens on the shared port variable (default `8428`). Grafana's plist runs `/opt/observability/grafana/bin/grafana server` (Grafana 11+ removed the separate `grafana-server` binary); its configuration, data, plugin, and log paths agree with the rendered `grafana.ini`.
+The VictoriaMetrics plist (`~/Library/LaunchAgents/com.observability.user.victoriametrics.plist`) points to `~/tools/observability/bin/victoria-metrics-prod`, stores data in `~/tools/observability/var/victoriametrics`, logs under `~/tools/observability/var/log`, and listens on the shared port variable (default `8428`, `8429` in side-by-side mode). All plist paths are absolute. Grafana's plist runs `~/tools/observability/grafana/bin/grafana server` (Grafana 11+ removed the separate `grafana-server` binary); its configuration, data, plugin, and log paths agree with the rendered `grafana.ini`.
 
 ## Monitored Mac flow
 
 The `observability_agent` role imports tasks in this order:
 
-1. `prerequisites.yml` asserts the `monitoring_server` group is usable, then creates the shared directory structure.
-2. `opentelemetry.yml` downloads and checksum-verifies the Darwin ARM64 `otelcol-contrib` archive, extracts it into a versioned directory, asserts the binary exists, repoints the `/opt/observability/bin/otelcol-contrib` symlink, renders the `0600` collector configuration and the plist, and requests service start.
+1. `prerequisites.yml` asserts the `monitoring_server` group is usable, runs `preflight`, then creates the shared directory structure.
+2. `opentelemetry.yml` downloads and checksum-verifies the Darwin ARM64 `otelcol-contrib` archive, extracts it into a versioned directory, asserts the binary exists, repoints the `~/tools/observability/bin/otelcol-contrib` symlink, renders the `0600` collector configuration and the LaunchAgent plist, and bootstraps it if not loaded. (`ssh_state.yml` runs before it and installs the SSH state script and its periodic LaunchAgent.)
 3. `flush_handlers` applies the pending restart before verification.
-4. `verify.yml` checks reachability to the monitoring server, runs `otelcol-contrib validate` against the rendered configuration, and then waits for host metrics to actually appear in VictoriaMetrics before reporting the hosts currently reporting.
+4. `verify.yml` checks the collector LaunchAgent is running (and the SSH state agent is loaded), reachability to the monitoring server, runs `otelcol-contrib validate` against the rendered configuration, and then waits for host metrics to actually appear in VictoriaMetrics before reporting the hosts currently reporting.
 
 The collector plist starts the same binary and configuration that the role renders:
 
 ```text
-/opt/observability/bin/otelcol-contrib
---config=/opt/observability/etc/otel-config.yaml
+/Users/<user>/tools/observability/bin/otelcol-contrib
+--config=/Users/<user>/tools/observability/etc/otel-config.yaml
 ```
 
 ## Collector pipeline
@@ -92,7 +95,7 @@ hostmetrics + tcp_check + otlp_json_file/ssh_state -> resourcedetection -> batch
 
 `tcp_check/monitoring_server` times a TCP connect to `<monitoring_server_address>:<victoriametrics_port>` every collection interval, producing `tcpcheck_duration_milliseconds` (latency to the monitoring Mac) and `tcpcheck_status_ratio` (1 reachable, 0 failed). It is controlled by `otel_latency_check_enabled` in the agent role defaults.
 
-`com.observability.sshstate` (a root LaunchDaemon with `StartInterval`) runs `bin/observability-ssh-state` every `otel_ssh_check_interval` (30 s). The script writes a one-line OTLP/JSON snapshot to `var/ssh-state/ssh-state.json` (`0700` directory, `0600` file), and the collector's `otlp_json_file/ssh_state` receiver reads each snapshot exactly once. That works because the snapshot's timestamp sits inside the receiver's 1000-byte file fingerprint. The metrics are `ssh_remote_login_enabled`, `ssh_port_listening`, `ssh_service_up`, `ssh_sessions` and `ssh_session_start_time_seconds` (see the SSH section of CLAUDE.md for the data model).
+`com.observability.user.sshstate` (a per-user LaunchAgent with `StartInterval`, running as the deployment user) runs `bin/observability-ssh-state` every `otel_ssh_check_interval` (30 s). The script writes a one-line OTLP/JSON snapshot to `var/ssh-state/ssh-state.json` (`0700` directory, `0600` file), and the collector's `otlp_json_file/ssh_state` receiver reads each snapshot exactly once. That works because the snapshot's timestamp sits inside the receiver's 1000-byte file fingerprint. The metrics are `ssh_remote_login_enabled`, `ssh_port_listening`, `ssh_service_up`, `ssh_sessions`, `ssh_connections` and `ssh_session_start_time_seconds`. Without root, sessions are attributed through `netstat -anv` socket owners and utmpx rather than `lsof`; see the capability matrix in [LAUNCHAGENT_VARIANT.md](LAUNCHAGENT_VARIANT.md#ssh-observability-capability-matrix) and the SSH section of CLAUDE.md.
 
 | Stage | What it does | Why it is used |
 | --- | --- | --- |
@@ -115,7 +118,7 @@ VictoriaMetrics persists the metric data. Grafana has two provisioned dashboards
 - **Mac Mini Fleet Overview** (`mac-mini-fleet`): every host on shared panels, one series per `host_name`, plus a Hosts table. A multi-value **Mac Mini** variable (`label_values(system_memory_usage_bytes, host_name)`, All = `.*`) filters every panel with `host_name=~"$host_name"`.
 - **Mac Mini Detail** (`mac-mini-detail`): one reusable per-host dashboard driven by a single-value `host_name` variable. Clicking a series in a fleet time-series panel, or a host name in the Hosts table, opens it with `?var-host_name=<host>` and the current time range.
 
-Both dashboards have SSH panels. The fleet dashboard has an **SSH Access** table (Remote Login, SSH Service UP/DOWN, port, session count per host) and a **Current SSH Sessions** table. The detail dashboard has an **SSH / Access** row with the same signals for one host, plus a session-count history.
+Both dashboards have SSH panels. The fleet dashboard has an **SSH Access** table (Remote Login, SSH Service UP/DOWN, port, attributed session count and TCP connection count per host) and a **Current SSH Sessions** table. The detail dashboard has an **SSH / Access** row with the same signals for one host, plus a session and TCP-connection history.
 
 ## Variables into templates
 
@@ -124,31 +127,32 @@ Ansible loads inventory and group variables for the target host, then renders Ji
 1. The agent obtains `monitoring_server_address` from `group_vars/all.yml`.
 2. It also obtains `victoriametrics_port` from the shared variables.
 3. `otel-config.yaml.j2` inserts both into the OTLP/HTTP metric endpoint.
-4. `otelcol.plist.j2` inserts `bin_dir`, `etc_dir`, and `log_dir` into `ProgramArguments` and log paths.
+4. `launchd_agent.plist.j2` inserts `bin_dir`, `etc_dir`, and `log_dir` (all absolute, under the user's home) into `ProgramArguments` and log paths.
 
 The same pattern connects server variables to the VictoriaMetrics and Grafana plists and configuration templates. This centralizes environment values and prevents the roles from embedding real infrastructure addresses.
 
 ## launchd integration
 
-The roles render system LaunchDaemon plists in `/Library/LaunchDaemons` for:
+The roles render per-user LaunchAgent plists in `~/Library/LaunchAgents` for:
 
-- `com.observability.victoriametrics`
-- `com.observability.grafana`
-- `com.observability.otelcol`
-- `com.observability.sshstate` (periodic, `StartInterval` instead of `KeepAlive`)
+- `com.observability.user.victoriametrics`
+- `com.observability.user.grafana`
+- `com.observability.user.otelcol`
+- `com.observability.user.sshstate` (periodic, `StartInterval` instead of `KeepAlive`)
 
-`ansible.builtin.service` has no macOS implementation, so the tasks and handlers drive `launchctl` directly instead: bootstrap-if-not-loaded to start/enable, bootout+bootstrap on restart. This is the current implementation, not a claim of tested runtime behavior. For diagnostics and manual recovery, see [LAUNCHD_TROUBLESHOOTING.md](../LAUNCHD_TROUBLESHOOTING.md).
+`ansible.builtin.service` has no macOS implementation, so the tasks and handlers drive `launchctl` directly in the per-user domain (`user/<uid>`, or `gui/<uid>`): bootstrap-if-not-loaded to start, bootout+bootstrap on restart. Nothing is bootstrapped into `system/`. Per-user agents are not started at boot; see the lifecycle table in [LAUNCHAGENT_VARIANT.md](LAUNCHAGENT_VARIANT.md#launchagent-lifecycle). For diagnostics and manual recovery, see [operating the LaunchAgents](LAUNCHAGENT_VARIANT.md#operating-the-launchagents).
 
 ## First Mac test flow
 
 1. Put one monitoring Mac and one agent Mac in their respective inventory groups.
 2. Deploy the server play and confirm VictoriaMetrics health and Grafana access.
 3. Deploy the agent play and validate the collector configuration.
-4. Confirm the agent can reach port `8428` on the monitoring Mac.
+4. Confirm the agent can reach `victoriametrics_port` (`8428`, or `8429` side by side) on the monitoring Mac.
 5. Confirm metrics arrive and appear in Grafana.
 6. Re-run the same plays to assess idempotency and observe launchd behavior.
+7. Reboot the worker and re-run the agent play for it (LaunchAgents do not start at boot).
 
-This is the required validation point before scaling. Real-Mac testing is in progress; launchd service lifecycle has not yet been confirmed working end to end.
+This is the required validation point before scaling. The full playbook has been run unprivileged on one Mac over a local connection; it has not yet been run over SSH against Mac Minis.
 
 ## Scaling flow
 
@@ -158,18 +162,19 @@ After the first test works, add more hosts under `monitored_nodes` and run the a
 
 Start at the layer nearest the failure:
 
-1. **Ansible access:** verify inventory address, SSH user, key access, sudo, and `ansible all -m ping`.
-2. **Installation paths:** verify binaries and generated configuration under `/opt/observability`.
-3. **Service process:** inspect the relevant launchd label and stdout/stderr logs.
-4. **Network:** verify agent access to the monitoring Mac on port `8428`; check server port conflicts.
-5. **Data:** check VictoriaMetrics health, then the Grafana datasource and dashboard.
+1. **Ansible access:** verify inventory address, SSH user, key access, and `ansible all -m ping`. No sudo is involved.
+2. **Preflight:** its failure message names the cause (root/become, missing launchd domain, system-level stack present, port in use).
+3. **Installation paths:** verify binaries and generated configuration under `~/tools/observability`.
+4. **Service process:** `launchctl print user/$(id -u)/<label>` and the stdout/stderr logs under `~/tools/observability/var/log`.
+5. **Network:** verify agent access to the monitoring Mac on `victoriametrics_port`; check server port conflicts.
+6. **Data:** check VictoriaMetrics health, then the Grafana datasource and dashboard.
 
-Use the dedicated [launchd troubleshooting guide](../LAUNCHD_TROUBLESHOOTING.md) for plist validation, `launchctl` commands, logs, and common service failures.
+Use [diagnosing failures](LAUNCHAGENT_VARIANT.md#diagnosing-failures) for plist validation, `launchctl` commands, logs, and common service failures.
 
 ## Automated and manual responsibilities
 
 | Automated by Ansible | Requires operator or real-Mac validation |
 | --- | --- |
-| Directory creation, downloads, archive extraction, template rendering, dashboard/datasource provisioning, and service requests | Inventory values, SSH and sudo access, Vault secret handling, network/firewall policy, launchd runtime behavior, and confirmation of end-to-end metrics |
+| Directory creation, downloads, archive extraction, template rendering, dashboard/datasource provisioning, and service requests | Inventory values, SSH access, Vault secret handling, network/firewall policy, LaunchAgent behaviour across logout and reboot, and confirmation of end-to-end metrics |
 
 Before physical Macs are available, static checks can validate YAML, Jinja templates, XML, JSON, variable references, and Ansible syntax when installed. Runtime behavior requires the first physical monitoring-and-agent test.

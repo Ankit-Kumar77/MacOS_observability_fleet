@@ -1,0 +1,154 @@
+---
+# Guards for the LaunchAgent / no-sudo variant. Included first from each
+# role's prerequisites.yml, before anything is written to the Mac. Every check
+# here is a read: nothing in this file needs root, and nothing in it touches
+# the system-level (main branch) deployment if one is present.
+#
+# Required variables:
+#   observability_service_labels         LaunchAgent labels this role loads.
+#   observability_service_ports          {label: port} for the agents in this
+#                                        role that listen on a TCP port ({}
+#                                        for roles that only send).
+#   observability_legacy_daemon_labels   LaunchDaemon labels the system-level
+#                                        deployment uses for the same services.
+#   observability_side_by_side_port_pairs
+#                                        [{name, port, legacy_port}] that must
+#                                        differ in side-by-side mode.
+#
+# Plus the shared variables from the role defaults and group_vars/all.yml:
+# base_dir, launch_agents_dir, launchd_domain_type, launchd_domain,
+# observability_side_by_side, observability_legacy_base_dir,
+# observability_legacy_launch_daemons_dir.
+
+# Connecting as root (or forcing --become) would install into /var/root and
+# load the agents into root's own domain -- the opposite of this variant.
+- name: Assert the deployment runs as an unprivileged user on macOS
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['system'] == 'Darwin'
+      - ansible_facts['user_uid'] | int != 0
+      - not (ansible_become | default(false) | bool)
+    fail_msg: >-
+      This is the LaunchAgent / no-sudo variant. Connect as the regular
+      deployment user, on macOS, without --become. Facts report
+      system={{ ansible_facts['system'] }}, uid={{ ansible_facts['user_uid'] }}.
+
+- name: Assert the install and launchd settings are usable
+  ansible.builtin.assert:
+    that:
+      - launchd_domain_type in ['user', 'gui']
+      - base_dir is match('/')
+      - launch_agents_dir is match('/')
+      - not ((base_dir ~ '/') is match((observability_legacy_base_dir | regex_escape) ~ '/'))
+    fail_msg: >-
+      launchd_domain_type must be user or gui (got {{ launchd_domain_type }}),
+      base_dir ({{ base_dir }}) and launch_agents_dir ({{ launch_agents_dir }})
+      must be absolute -- launchd does not expand ~ -- and base_dir must not be
+      inside the system-level install at {{ observability_legacy_base_dir }}.
+
+# The per-user domain is where every launchctl call in this variant goes. If
+# it does not exist there is nothing unprivileged that can create it, so fail
+# here rather than bootstrap into a different user's or the system context.
+- name: Check that the per-user launchd domain exists
+  ansible.builtin.command:
+    cmd: "launchctl print {{ launchd_domain }}"
+  register: observability_preflight_domain
+  changed_when: false
+  failed_when: false
+
+- name: Assert the per-user launchd domain is available
+  ansible.builtin.assert:
+    that:
+      - observability_preflight_domain.rc == 0
+    fail_msg: >-
+      launchd domain {{ launchd_domain }} is not available for
+      {{ ansible_facts['user_id'] }} (launchctl print exited
+      {{ observability_preflight_domain.rc }}).
+      {% if launchd_domain_type == 'gui' %}
+      gui/<uid> only exists while this user is logged in at the Mac's console
+      (or via auto-login). Log in at the console, or set
+      launchd_domain_type: user to use the background user/<uid> domain.
+      {% else %}
+      user/<uid> normally exists for any logged-in user, including an SSH
+      session. Check that Ansible is connecting as the intended user and that
+      the account is not restricted; this playbook will not fall back to
+      another domain or to sudo.
+      {% endif %}
+
+# Both reads below work unprivileged: /Library/LaunchDaemons is world-readable
+# and `launchctl print system/<label>` answers for any user.
+- name: Check for system-level LaunchDaemon plists from the main deployment
+  ansible.builtin.stat:
+    path: "{{ observability_legacy_launch_daemons_dir }}/{{ item }}.plist"
+  loop: "{{ observability_legacy_daemon_labels }}"
+  register: observability_preflight_legacy_plists
+
+- name: Check for system-level LaunchDaemons loaded by the main deployment
+  ansible.builtin.command:
+    cmd: "launchctl print system/{{ item }}"
+  loop: "{{ observability_legacy_daemon_labels }}"
+  register: observability_preflight_legacy_loaded
+  changed_when: false
+  failed_when: false
+
+- name: Summarise any system-level deployment found on this Mac
+  ansible.builtin.set_fact:
+    observability_preflight_legacy_found: >-
+      {{ (observability_preflight_legacy_plists.results | selectattr('stat.exists') | map(attribute='stat.path') | list)
+         + (observability_preflight_legacy_loaded.results | selectattr('rc', 'equalto', 0) | map(attribute='item') | map('regex_replace', '^', 'system/') | list) }}
+
+# Without side-by-side mode both copies would share ports 8428/3000 (server)
+# or report every metric twice into one VictoriaMetrics (agent). Removing the
+# old copy needs an administrator, so this variant never tries.
+- name: Assert the system-level deployment is absent unless side-by-side mode is on
+  ansible.builtin.assert:
+    that:
+      - (observability_preflight_legacy_found | length == 0) or (observability_side_by_side | bool)
+    fail_msg: >-
+      Found the system-level (main branch) deployment on this Mac:
+      {{ observability_preflight_legacy_found | join(', ') }}.
+      This playbook will not stop or remove it. Either set
+      observability_side_by_side: true (inventories/production/group_vars/all.yml
+      or -e) to run this LaunchAgent stack beside it on alternate ports, or have
+      an administrator remove the old deployment first.
+
+- name: Assert side-by-side mode keeps ports and storage apart from the system-level deployment
+  ansible.builtin.assert:
+    that:
+      - observability_side_by_side_port_pairs | map(attribute='port') | map('int') | list
+        | intersect(observability_side_by_side_port_pairs | map(attribute='legacy_port') | map('int') | list) | length == 0
+      - observability_service_labels | intersect(observability_legacy_daemon_labels) | length == 0
+    fail_msg: >-
+      Side-by-side mode needs every port to differ from the system-level
+      deployment's
+      ({% for pair in observability_side_by_side_port_pairs %}{{ pair.name }} {{ pair.port }} vs {{ pair.legacy_port }}{{ '' if loop.last else ', ' }}{% endfor %})
+      and every LaunchAgent label to differ from its LaunchDaemon labels.
+  when: observability_side_by_side | bool
+
+- name: Check whether this role's LaunchAgents are already loaded
+  ansible.builtin.command:
+    cmd: "launchctl print {{ launchd_domain }}/{{ item }}"
+  loop: "{{ observability_service_ports.keys() | list }}"
+  register: observability_preflight_loaded
+  changed_when: false
+  failed_when: false
+
+# A port that is already taken before our agent is loaded belongs to someone
+# else -- typically the system-level stack -- and the agent would crash-loop
+# under KeepAlive. Once our own agent is loaded, it is the one holding it.
+- name: Assert the ports for agents not yet loaded are free
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ observability_service_ports[item.item] }}"
+    state: stopped
+    timeout: 1
+    msg: >-
+      Port {{ observability_service_ports[item.item] }} on this Mac is already
+      in use by another process, so {{ item.item }} cannot start. If the
+      system-level deployment holds it, enable observability_side_by_side or
+      pick different ports; check with
+      `lsof -nP -iTCP:{{ observability_service_ports[item.item] }} -sTCP:LISTEN`.
+  loop: "{{ observability_preflight_loaded.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.rc != 0

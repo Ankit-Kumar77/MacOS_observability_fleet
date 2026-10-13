@@ -453,7 +453,7 @@
       "id": 24,
       "type": "stat",
       "title": "Active SSH Sessions",
-      "description": "Authenticated SSH connections right now.",
+      "description": "Authenticated SSH sessions the unprivileged collector could attribute right now. Compare with TCP connections on the SSH Sessions graph: more connections than sessions means some sessions (or pre-authentication connections) are not attributed.",
       "datasource": {{ ds | tojson }},
       "gridPos": {"x": 18, "y": 54, "w": 6, "h": 4},
       "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
@@ -471,7 +471,7 @@
       "id": 25,
       "type": "table",
       "title": "Current SSH Sessions",
-      "description": "Live authenticated SSH sessions: user, source address, terminal (notty = scp, sftp or a remote command) and login time. Only the fields shown are collected; nothing from inside the session is recorded.",
+      "description": "Live authenticated SSH sessions the unprivileged collector could attribute: user, source address, terminal (notty = scp, sftp or a remote command) and login time. Terminal sessions of any user are covered; another user's notty session is listed only when its socket can be tied to its sshd process. Only the fields shown are collected; nothing from inside the session is recorded.",
       "datasource": {{ ds | tojson }},
       "gridPos": {"x": 0, "y": 58, "w": 16, "h": 8},
       "options": {"showHeader": true, "cellHeight": "sm", "sortBy": [{"displayName": "Logged in", "desc": true}]},
@@ -510,7 +510,7 @@
       "id": 26,
       "type": "timeseries",
       "title": "SSH Sessions",
-      "description": "Authenticated SSH connections over time.",
+      "description": "Attributed SSH sessions and established TCP connections on the SSH port over time. Connections include sessions the unprivileged collector cannot attribute and connections still authenticating.",
       "datasource": {{ ds | tojson }},
       "gridPos": {"x": 16, "y": 58, "w": 8, "h": 8},
       "fieldConfig": {"defaults": {"unit": "none", "min": 0, "softMax": 1, "decimals": 0, "custom": {"drawStyle": "line", "lineInterpolation": "stepAfter"}}, "overrides": []},
@@ -520,6 +520,12 @@
           "datasource": {{ ds | tojson }},
           "expr": "max(ssh_sessions{host_name=\"$host_name\"})",
           "legendFormat": "sessions"
+        },
+        {
+          "refId": "B",
+          "datasource": {{ ds | tojson }},
+          "expr": "max(ssh_connections{host_name=\"$host_name\"})",
+          "legendFormat": "TCP connections"
         }
       ]
     }

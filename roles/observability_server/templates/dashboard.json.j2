@@ -280,7 +280,7 @@
       "id": 10,
       "type": "table",
       "title": "SSH Access",
-      "description": "Per Mac: Remote Login is the launchd sshd job being loaded; SSH Service is sshd answering with an SSH protocol banner on loopback (launchd holds port 22 open even when sshd itself is broken, so an open port alone is not proof); Sessions counts authenticated SSH connections. Refreshed every otel_ssh_check_interval by com.observability.sshstate.",
+      "description": "Per Mac: Remote Login is the launchd sshd job being loaded; SSH Service is sshd answering with an SSH protocol banner on loopback (launchd holds port 22 open even when sshd itself is broken, so an open port alone is not proof); Sessions counts authenticated SSH sessions the collector could attribute; TCP Connections counts every established connection on the SSH port. The collector runs as the unprivileged deployment user (LaunchAgent), so a session it cannot attribute -- typically another user's scp/sftp/notty session -- shows up only as Connections > Sessions. Refreshed every otel_ssh_check_interval by the SSH state LaunchAgent.",
       "datasource": {{ ds | tojson }},
       "gridPos": {"x": 0, "y": 34, "w": 24, "h": 8},
       "options": {"showHeader": true, "cellHeight": "sm", "sortBy": [{"displayName": "Mac Mini", "desc": false}]},
@@ -291,7 +291,8 @@
           {"matcher": {"id": "byName", "options": "Value #A"}, "properties": [{"id": "displayName", "value": "Remote Login"}, {"id": "custom.cellOptions", "value": {"type": "color-text"}}, {"id": "mappings", "value": [{"type": "value", "options": {"0": {"text": "Off", "color": "orange"}, "1": {"text": "On", "color": "green"}}}]}]},
           {"matcher": {"id": "byName", "options": "Value #B"}, "properties": [{"id": "displayName", "value": "SSH Service"}, {"id": "custom.cellOptions", "value": {"type": "color-background"}}, {"id": "mappings", "value": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}]},
           {"matcher": {"id": "byName", "options": "Value #C"}, "properties": [{"id": "displayName", "value": "Port"}, {"id": "custom.cellOptions", "value": {"type": "color-text"}}, {"id": "mappings", "value": [{"type": "value", "options": {"0": {"text": "Closed", "color": "red"}, "1": {"text": "Listening", "color": "green"}}}]}]},
-          {"matcher": {"id": "byName", "options": "Value #D"}, "properties": [{"id": "displayName", "value": "Sessions"}, {"id": "unit", "value": "none"}, {"id": "decimals", "value": 0}]}
+          {"matcher": {"id": "byName", "options": "Value #D"}, "properties": [{"id": "displayName", "value": "Sessions"}, {"id": "unit", "value": "none"}, {"id": "decimals", "value": 0}]},
+          {"matcher": {"id": "byName", "options": "Value #E"}, "properties": [{"id": "displayName", "value": "TCP Connections"}, {"id": "unit", "value": "none"}, {"id": "decimals", "value": 0}]}
         ]
       },
       "targets": [
@@ -322,18 +323,25 @@
           "expr": "max by (host_name) (ssh_sessions{host_name=~\"$host_name\"})",
           "format": "table",
           "instant": true
+        },
+        {
+          "refId": "E",
+          "datasource": {{ ds | tojson }},
+          "expr": "max by (host_name) (ssh_connections{host_name=~\"$host_name\"})",
+          "format": "table",
+          "instant": true
         }
       ],
       "transformations": [
         {"id": "merge", "options": {}},
-        {"id": "organize", "options": {"excludeByName": {"Time": true}, "indexByName": {"host_name": 0, "Value #B": 1, "Value #C": 2, "Value #D": 3, "Value #A": 4}}}
+        {"id": "organize", "options": {"excludeByName": {"Time": true}, "indexByName": {"host_name": 0, "Value #B": 1, "Value #C": 2, "Value #D": 3, "Value #E": 4, "Value #A": 5}}}
       ]
     },
     {
       "id": 11,
       "type": "table",
       "title": "Current SSH Sessions",
-      "description": "Live authenticated SSH sessions: user, source address, terminal (notty = scp, sftp or a remote command) and login time. Only the fields shown are collected; nothing from inside the session is recorded.",
+      "description": "Live authenticated SSH sessions the unprivileged collector could attribute: user, source address, terminal (notty = scp, sftp or a remote command) and login time. Terminal sessions of any user are covered; another user's notty session is listed only when its socket can be tied to its sshd process. Only the fields shown are collected; nothing from inside the session is recorded.",
       "datasource": {{ ds | tojson }},
       "gridPos": {"x": 0, "y": 42, "w": 24, "h": 8},
       "options": {"showHeader": true, "cellHeight": "sm", "sortBy": [{"displayName": "Mac Mini", "desc": false}]},

@@ -1,4 +1,25 @@
 ---
+# KeepAlive restarts a crashing collector forever, so "loaded" alone proves
+# little; require launchd to report it running in this user's domain. The SSH
+# state job is periodic (StartInterval) and is idle between runs, so for it
+# being loaded is the right check.
+- name: Verify the collector LaunchAgent is running in the per-user launchd domain
+  ansible.builtin.command:
+    cmd: "launchctl print {{ launchd_domain }}/{{ otel_collector_launchd_label }}"
+  register: observability_agent_collector_state
+  until: observability_agent_collector_state.rc == 0 and 'state = running' in observability_agent_collector_state.stdout
+  retries: 5
+  delay: 2
+  changed_when: false
+  tags: ['verify']
+
+- name: Verify the SSH state LaunchAgent is loaded in the per-user launchd domain
+  ansible.builtin.command:
+    cmd: "launchctl print {{ launchd_domain }}/{{ otel_ssh_state_launchd_label }}"
+  changed_when: false
+  when: otel_ssh_monitoring_enabled | bool
+  tags: ['verify']
+
 - name: Verify monitoring server is reachable
   ansible.builtin.wait_for:
     host: "{{ monitoring_server_address }}"
@@ -57,6 +78,8 @@
 - name: Report agent verification success
   ansible.builtin.debug:
     msg: >-
-      Collector configuration is valid and metrics are reaching VictoriaMetrics.
+      Collector configuration is valid, the collector is running as a
+      LaunchAgent in {{ launchd_domain }}, and metrics are reaching
+      VictoriaMetrics on port {{ victoriametrics_port }}.
       Hosts currently reporting: {{ observability_agent_vm_hostnames.json.data | default([]) | join(', ') }}
   tags: ['verify']

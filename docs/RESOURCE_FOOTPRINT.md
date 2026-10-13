@@ -2,6 +2,8 @@
 
 ## Scope
 
+> LaunchAgent / no-sudo branch: everything lives under the deployment user's `~/tools/observability` (not `/opt/observability`), so this disk comes out of that user's home volume. Plists are in `~/Library/LaunchAgents`. Release archives are staged in `~/tools/observability/var/downloads` and deleted after extraction.
+
 This document estimates the initial on-disk footprint of the current project for review and capacity planning. It covers one monitoring Mac Mini and one worker/monitored Mac Mini only. It does not assume a final fleet size.
 
 The figures below were **measured** by extracting the currently configured Apple Silicon macOS archives on an arm64 Mac: VictoriaMetrics `1.150.0`, Grafana `13.2.0`, and OpenTelemetry Collector Contrib `0.159.0`. Actual size still varies with release packaging, macOS version, and generated logs.
@@ -27,10 +29,10 @@ constraint.
 
 ### What is included
 
-- **Monitoring Mac:** `/opt/observability/bin/victoria-metrics-prod`, the Grafana installation under `/opt/observability/grafana`, Grafana/VictoriaMetrics configuration, provisioning files, launchd plists, and initial logs.
-- **Worker/Monitored Mac:** `/opt/observability/bin/otelcol-contrib`, `/opt/observability/etc/otel-config.yaml`, the collector launchd plist, and initial logs.
+- **Monitoring Mac:** `~/tools/observability/bin/victoria-metrics-prod`, the Grafana installation under `~/tools/observability/grafana`, Grafana/VictoriaMetrics configuration, provisioning files, LaunchAgent plists, and initial logs.
+- **Worker/Monitored Mac:** `~/tools/observability/bin/otelcol-contrib`, `~/tools/observability/etc/otel-config.yaml`, the SSH state script, the collector and SSH state LaunchAgent plists, and initial logs.
 
-Each release is installed into its own versioned directory (for example `/opt/observability/grafana-13.2.0`) with a stable symlink pointing at the active one. Upgrading does not remove the previous version, so the installed footprint grows by roughly one full installation for every version deployed until old directories are pruned deliberately. Budget for at least two concurrent versions on any Mac that has been upgraded once.
+Each release is installed into its own versioned directory (for example `~/tools/observability/grafana-13.2.0`) with a stable symlink pointing at the active one. Upgrading does not remove the previous version, so the installed footprint grows by roughly one full installation for every version deployed until old directories are pruned deliberately. Budget for at least two concurrent versions on any Mac that has been upgraded once.
 
 The current install tasks download version-stamped archives to `/tmp` before extraction. Those temporary archives are not included in the table because they are not part of the intended installed footprint, but they can temporarily consume additional disk space during deployment if the operating system does not clean them up.
 
@@ -44,7 +46,7 @@ VictoriaMetrics historical metric storage is not included in the initial monitor
 - Retention period.
 - Metric cardinality, including distinct host and filesystem/network attributes.
 
-Logs under `/opt/observability/var/log` can also grow over time, especially when a service repeatedly fails or cannot reach its destination. The current project does not configure log rotation; monitor this directory during the first real-Mac test.
+Logs under `~/tools/observability/var/log` can also grow over time, especially when a service repeatedly fails or cannot reach its destination. The current project does not configure log rotation; monitor this directory during the first real-Mac test.
 
 ## Scaling Formula
 

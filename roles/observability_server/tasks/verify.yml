@@ -1,4 +1,19 @@
 ---
+# KeepAlive restarts a crashing agent forever, so "loaded" alone proves little;
+# require launchd to report the process as running in this user's domain.
+- name: Verify the server LaunchAgents are running in the per-user launchd domain
+  ansible.builtin.command:
+    cmd: "launchctl print {{ launchd_domain }}/{{ item }}"
+  register: observability_server_agent_state
+  until: observability_server_agent_state.rc == 0 and 'state = running' in observability_server_agent_state.stdout
+  retries: 5
+  delay: 2
+  changed_when: false
+  loop:
+    - "{{ victoriametrics_launchd_label }}"
+    - "{{ grafana_launchd_label }}"
+  tags: ['verify']
+
 # /health is deliberately exempt from VictoriaMetrics basic auth, so this stays
 # an unauthenticated probe even when authentication is enabled.
 - name: Wait for VictoriaMetrics to become ready
@@ -78,6 +93,8 @@
 - name: Report server verification success
   ansible.builtin.debug:
     msg: >-
-      VictoriaMetrics and Grafana are healthy, the VictoriaMetrics datasource is
-      registered, and the Mac Mini fleet and detail dashboards are provisioned.
+      VictoriaMetrics (port {{ victoriametrics_port }}) and Grafana (port
+      {{ grafana_port }}) are running as LaunchAgents in {{ launchd_domain }},
+      the VictoriaMetrics datasource is registered, and the Mac Mini fleet and
+      detail dashboards are provisioned.
   tags: ['verify']

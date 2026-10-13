@@ -1,4 +1,20 @@
 ---
+# Read-only checks first: unprivileged user, per-user launchd domain present,
+# no clash with a system-level deployment, ports free. Nothing is written to
+# the Mac until these pass.
+- name: Run the LaunchAgent / no-sudo preflight checks
+  ansible.builtin.include_role:
+    name: observability_common
+    tasks_from: preflight
+  vars:
+    observability_service_labels:
+      - "{{ victoriametrics_launchd_label }}"
+      - "{{ grafana_launchd_label }}"
+    observability_service_ports: "{{ {victoriametrics_launchd_label: victoriametrics_port, grafana_launchd_label: grafana_port} }}"
+    observability_side_by_side_port_pairs:
+      - {name: VictoriaMetrics, port: "{{ victoriametrics_port }}", legacy_port: "{{ observability_legacy_victoriametrics_port }}"}
+      - {name: Grafana, port: "{{ grafana_port }}", legacy_port: "{{ observability_legacy_grafana_port }}"}
+
 # NOTE: {{ grafana_home }} is deliberately absent from the directory list. It is
 # created as a symlink to the versioned Grafana install directory in grafana.yml,
 # and ansible.builtin.file will refuse to replace a real directory with a symlink.
@@ -9,8 +25,10 @@
     tasks_from: base_directories
   vars:
     observability_extra_directories:
-      - "{{ var_dir }}/victoriametrics"
+      - "{{ victoriametrics_data_dir }}"
       - "{{ var_dir }}/grafana"
       - "{{ var_dir }}/grafana/plugins"
+      - "{{ etc_dir }}/grafana"
+      - "{{ etc_dir }}/grafana/provisioning"
       - "{{ etc_dir }}/grafana/provisioning/datasources"
       - "{{ etc_dir }}/grafana/provisioning/dashboards"

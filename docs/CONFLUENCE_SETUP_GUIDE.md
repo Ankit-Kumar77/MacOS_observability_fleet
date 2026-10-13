@@ -1,5 +1,7 @@
 # Mac Mini Observability — Setup Guide
 
+> **This page describes the system-level deployment on `main` (sudo, root LaunchDaemons, `/opt/observability`).** For the LaunchAgent / no-sudo branch, follow [README.md](../README.md) and [LAUNCHAGENT_VARIANT.md](LAUNCHAGENT_VARIANT.md) instead: no `--ask-become-pass`, everything under `~/tools/observability`, services in `~/Library/LaunchAgents`.
+
 > **Page owner:** Platform / Infrastructure
 > **Applies to:** Apple Silicon (arm64) Mac Minis running macOS
 > **Repository:** `MacOS_observability_fleet`

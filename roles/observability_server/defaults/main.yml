@@ -1,10 +1,44 @@
 ---
-# Filesystem layout. Override in inventory group_vars to relocate the stack.
-base_dir: /opt/observability
+# Filesystem layout. Everything is owned by the connecting Ansible user; no
+# sudo is used anywhere. user_dir is that user's home directory, taken from
+# gathered facts. Override in inventory group_vars to relocate the stack, but
+# keep it out of ~/Desktop, ~/Documents and ~/Downloads: macOS privacy
+# controls (TCC) block background LaunchAgents from reading those.
+base_dir: "{{ ansible_facts['user_dir'] }}/tools/observability"
 bin_dir: "{{ base_dir }}/bin"
 etc_dir: "{{ base_dir }}/etc"
 var_dir: "{{ base_dir }}/var"
 log_dir: "{{ var_dir }}/log"
+# Release archives are staged here, not in the shared /tmp, and removed after
+# extraction.
+download_dir: "{{ var_dir }}/downloads"
+
+# Per-user launchd. Plists go in the user's own LaunchAgents directory and are
+# loaded into a per-user domain, never system/.
+#
+#   user  (default) user/<uid>: loadable over SSH without a console login;
+#         plists carry LimitLoadToSessionType Background.
+#   gui   gui/<uid>: only exists while this user is logged in at the console;
+#         plists carry Aqua, so launchd also loads them at console login.
+#
+# See "LaunchAgent lifecycle" in docs/LAUNCHAGENT_VARIANT.md for what each
+# means across logout and reboot.
+launch_agents_dir: "{{ ansible_facts['user_dir'] }}/Library/LaunchAgents"
+launchd_domain_type: user
+launchd_domain: "{{ launchd_domain_type }}/{{ ansible_facts['user_uid'] }}"
+# Distinct from the system-level deployment's com.observability.* LaunchDaemon
+# labels, so the two can never be mistaken for each other in launchctl output,
+# logs or plist names when they run side by side.
+launchd_label_prefix: com.observability.user
+victoriametrics_launchd_label: "{{ launchd_label_prefix }}.victoriametrics"
+victoriametrics_launchd_plist: "{{ launch_agents_dir }}/{{ victoriametrics_launchd_label }}.plist"
+grafana_launchd_label: "{{ launchd_label_prefix }}.grafana"
+grafana_launchd_plist: "{{ launch_agents_dir }}/{{ grafana_launchd_label }}.plist"
+# LaunchDaemon labels of the system-level deployment for the same services.
+# Only ever read (stat / launchctl print) by preflight, never modified.
+observability_legacy_daemon_labels:
+  - com.observability.victoriametrics
+  - com.observability.grafana
 
 # VictoriaMetrics.
 victoriametrics_version: "1.101.0"
@@ -15,6 +49,9 @@ victoriametrics_install_dir: "{{ bin_dir }}/victoria-metrics-{{ victoriametrics_
 # VictoriaMetrics deletes data older than this. Its own default is 1 month,
 # which is easy to be surprised by; set it explicitly.
 victoriametrics_retention: "90d"
+# User-owned and separate from the system-level /opt/observability data, so
+# the two stacks can never share a storage directory.
+victoriametrics_data_dir: "{{ var_dir }}/victoriametrics"
 
 # Grafana.
 grafana_version: "13.2.0"
@@ -23,7 +60,9 @@ grafana_download_url: "https://dl.grafana.com/oss/release/grafana-{{ grafana_ver
 grafana_checksum: "sha256:338201906b6fb997c58a63eab074d496a43561350ddd1d714b2ef510f3eddea2"
 grafana_install_dir: "{{ base_dir }}/grafana-{{ grafana_version }}"
 grafana_home: "{{ base_dir }}/grafana"
-grafana_port: 3000
+# 3000 normally; observability_side_by_side_grafana_port (3001) in
+# side-by-side mode. Override directly for any other port.
+grafana_port: "{{ observability_side_by_side_grafana_port | default(3001) if observability_side_by_side | default(false) | bool else 3000 }}"
 # Matches the agent collection interval so Grafana picks a sensible step.
 grafana_time_interval: "15s"
 # Provisioned dashboard uids. The fleet dashboard links to the host detail
@@ -44,14 +83,14 @@ service_ready_delay: 5
 # host.name), and every dashboard query silently returns zero series.
 victoriametrics_base_arguments:
   - "{{ bin_dir }}/victoria-metrics-prod"
-  - "-storageDataPath={{ var_dir }}/victoriametrics"
+  - "-storageDataPath={{ victoriametrics_data_dir }}"
   - "-httpListenAddr=:{{ victoriametrics_port }}"
   - "-retentionPeriod={{ victoriametrics_retention }}"
   - "-opentelemetry.usePrometheusNaming"
 
 # Appended only when victoriametrics_auth_enabled. The password is read from a
-# 0600 file rather than passed inline, so it stays out of the world-readable
-# plist and out of `ps` output.
+# 0600 file rather than passed inline, so it stays out of the plist and out of
+# `ps` output.
 victoriametrics_auth_arguments:
   - "-httpAuth.username={{ victoriametrics_auth_username }}"
   - "-httpAuth.password=file://{{ etc_dir }}/victoriametrics-auth-password"

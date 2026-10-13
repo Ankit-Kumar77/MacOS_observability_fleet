@@ -1,5 +1,7 @@
 # Writeup: macOS compatibility, correctness and hardening
 
+> **Historical document.** This writeup describes the system-level (root LaunchDaemon, `/opt/observability`) work on `main`. On the LaunchAgent / no-sudo branch, ownership is the deployment user rather than `root:wheel`, and services are per-user LaunchAgents. See [docs/LAUNCHAGENT_VARIANT.md](docs/LAUNCHAGENT_VARIANT.md).
+
 This document explains everything changed in this branch, why, and what was
 verified versus what still needs real hardware. It is written for whoever
 reviews or deploys this next.

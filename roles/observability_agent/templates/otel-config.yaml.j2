@@ -44,7 +44,7 @@ receivers:
 {% endif %}
 {% if otel_ssh_monitoring_enabled | bool %}
 
-  # SSH access state written by com.observability.sshstate. Each snapshot is
+  # SSH access state written by the {{ otel_ssh_state_launchd_label }} LaunchAgent. Each snapshot is
   # atomically replaced and carries a fresh timestamp in its first bytes, so
   # the receiver reads each one exactly once; exclude_older_than stops a stale
   # snapshot being re-read after a collector restart.

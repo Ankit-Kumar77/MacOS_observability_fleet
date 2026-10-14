@@ -211,12 +211,13 @@ Versions, checksums and tuning are role defaults under `roles/<role>/defaults/ma
 **Found on the first real side-by-side deployment (MM7 server, MM4 worker), October 2026:**
 
 - **Collector port conflict (fixed).** The collector's internal telemetry defaulted to `127.0.0.1:8888`, which the system-level collector already holds, so the new collector could not start. It now uses `otel_internal_metrics_port` (18888), and preflight checks that port. Reproduced and fixed locally, with a stand-in listener on 8888.
-- **The new collector can't send to the monitoring Mac when both are on the same subnet.** With both Macs on one subnet, the collector LaunchAgent on MM4 logged `connect: no route to host` to `10.43.110.29:8429`. Over SSH, `curl` to the same address returned 200, and the root system-level collector kept working. That pattern matches macOS Local Network Privacy, which exempts root, launchd daemons and SSH sessions but not launchd agents. This is a diagnosis, not yet confirmed on MM4. It needs the console user or an administrator; see [Local Network Privacy](docs/LAUNCHAGENT_VARIANT.md#local-network-privacy-why-a-worker-can-get-no-route-to-host). Agent verification now names it when it happens.
+- **The new collector can't send to the monitoring Mac when both are on the same subnet.** With both Macs on one subnet, the collector LaunchAgent on MM4 logged `connect: no route to host` to the monitoring Mac on port 8429. Over SSH, `curl` to the same address returned 200, and the root system-level collector kept working. That pattern matches macOS Local Network Privacy, which exempts root, launchd daemons and SSH sessions but not launchd agents. This is a diagnosis, not yet confirmed on MM4. It needs the console user or an administrator; see [Local Network Privacy](docs/LAUNCHAGENT_VARIANT.md#local-network-privacy-why-a-worker-can-get-no-route-to-host). Agent verification now names it when it happens.
 
 Do not treat this branch as production-tested until a monitoring Mac plus one worker Mac succeed over SSH and survive a reboot cycle as documented.
 
 ## More documentation
 
+- [Confluence page: LaunchAgent deployment](docs/CONFLUENCE_LAUNCHAGENT_GUIDE.html): paste-ready HTML guide, including the Local Network Privacy issue
 - [LaunchAgent / no-sudo variant](docs/LAUNCHAGENT_VARIANT.md): differences, lifecycle, SSH capability matrix, side-by-side mode, operations
 - [Project internal flow](docs/PROJECT_FLOW.md)
 - [KT guide](docs/KT_GUIDE.md)

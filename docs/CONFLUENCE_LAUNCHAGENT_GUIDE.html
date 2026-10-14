@@ -5,274 +5,190 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mac Mini Observability (LaunchAgent)</title>
 <!--
-  Confluence page source for the LaunchAgent / no-sudo deployment.
-  To publish: open this file in a browser, select all, and paste it into a
-  Confluence page in the editor; headings, tables, panels and code blocks are
-  kept. Styles are inline and basic so they survive the paste.
+  Confluence page source. To publish: open this file in a browser, select
+  all, and paste into a Confluence page. Styles are inline-friendly so the
+  headings, tables, panels and code blocks survive the paste.
   Keep in sync with docs/LAUNCHAGENT_VARIANT.md and README.md.
   Never put real addresses, SSH users or credentials in this file.
 -->
 <style>
-  body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; color: #172b4d; background: #ffffff; max-width: 980px; margin: 0 auto; padding: 16px; line-height: 1.5; }
-  h1 { font-size: 28px; margin-bottom: 4px; }
-  h2 { font-size: 22px; margin-top: 32px; border-bottom: 1px solid #dfe1e6; padding-bottom: 4px; }
-  h3 { font-size: 17px; margin-top: 20px; }
-  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; color: #172b4d; background: #ffffff; max-width: 960px; margin: 0 auto; padding: 16px; line-height: 1.55; }
+  h1 { font-size: 26px; margin-bottom: 8px; }
+  h2 { font-size: 20px; margin-top: 30px; border-bottom: 1px solid #dfe1e6; padding-bottom: 4px; }
+  h3 { font-size: 16px; margin-top: 18px; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; }
   th, td { border: 1px solid #c1c7d0; padding: 6px 10px; text-align: left; vertical-align: top; }
   th { background: #f4f5f7; }
   code { font-family: SFMono-Regular, Menlo, Consolas, monospace; font-size: 90%; background: #f4f5f7; padding: 1px 4px; border-radius: 3px; }
   pre { background: #f4f5f7; border: 1px solid #dfe1e6; padding: 10px; overflow-x: auto; border-radius: 3px; }
   pre code { background: none; padding: 0; }
-  .panel { border-left: 4px solid; padding: 8px 14px; margin: 14px 0; border-radius: 3px; }
+  .panel { border-left: 4px solid; padding: 8px 14px; margin: 12px 0; border-radius: 3px; }
   .info { border-color: #0052cc; background: #deebff; }
   .warn { border-color: #ff991f; background: #fffae6; }
-  .error { border-color: #de350b; background: #ffebe6; }
   .ok { border-color: #00875a; background: #e3fcef; }
-  .meta td:first-child { width: 160px; font-weight: 600; background: #f4f5f7; }
+  .meta td:first-child { width: 150px; font-weight: 600; background: #f4f5f7; }
 </style>
 </head>
 <body>
 
-<h1>Mac Mini Observability — LaunchAgent (no-sudo) deployment</h1>
+<h1>Mac Mini Observability — LaunchAgent Deployment</h1>
 
 <table class="meta">
-  <tr><td>Page owner</td><td>Platform / Infrastructure</td></tr>
-  <tr><td>Repository</td><td><code>MacOS_observability_fleet</code>, branch <code>LaunchAgent</code></td></tr>
-  <tr><td>Applies to</td><td>Apple Silicon (arm64) Mac Minis, macOS 15 or later</td></tr>
-  <tr><td>Privileges</td><td>None. Normal SSH user, no sudo, no admin rights.</td></tr>
-  <tr><td>Status</td><td>Server stack deployed and verified on the monitoring Mac. Worker export is <strong>blocked by macOS Local Network Privacy</strong> (see <a href="#known-issue">Known issue</a>). Not yet production-tested.</td></tr>
+  <tr><td>Owner</td><td>Platform / Infrastructure</td></tr>
+  <tr><td>Repository</td><td><code>MacOS_observability_fleet</code> (branch <code>LaunchAgent</code>)</td></tr>
+  <tr><td>Platform</td><td>Apple Silicon Mac Minis, macOS 15 or later</td></tr>
+  <tr><td>Access needed</td><td>Standard user account over SSH. No sudo or admin rights.</td></tr>
+  <tr><td>Status</td><td>Monitoring server deployed and verified. Worker metric export pending a macOS permission (see <a href="#known-issue">Known issue</a>).</td></tr>
 </table>
 
-<div class="panel warn">
-  <strong>Read before deploying.</strong> This variant runs as per-user <em>LaunchAgents</em>. They do <strong>not start at boot</strong>, and on macOS 15+ a worker's collector needs the <strong>Local Network</strong> privilege before it can send metrics to a monitoring Mac on the same subnet. Both are explained below.
-</div>
-
-<h2>1. What this is</h2>
-<p>Ansible deploys host-metric observability to a fleet of Mac Minis. One Mac runs VictoriaMetrics and Grafana; every other Mac runs the OpenTelemetry Collector. This branch is the <code>main</code> deployment re-built to need no sudo: everything installs under the deployment user's home and runs as per-user LaunchAgents.</p>
+<h2>1. Overview</h2>
+<p>This deployment monitors a fleet of Mac Minis using Ansible. One Mac (the <strong>monitoring server</strong>) stores and displays metrics; every other Mac (a <strong>worker</strong>) collects and sends them. All software installs under the deployment user's home directory and runs as per-user <strong>LaunchAgents</strong>, so no administrator access is required.</p>
 
 <table>
-  <tr><th></th><th><code>main</code> (system-level)</th><th><code>LaunchAgent</code> (this page)</th></tr>
-  <tr><td>Ansible privilege</td><td><code>become</code>, <code>--ask-become-pass</code></td><td><code>become = False</code> everywhere</td></tr>
-  <tr><td>Services</td><td>root LaunchDaemons, <code>/Library/LaunchDaemons</code></td><td>LaunchAgents, <code>~/Library/LaunchAgents</code></td></tr>
-  <tr><td>launchd domain</td><td><code>system</code></td><td><code>user/&lt;uid&gt;</code> (default) or <code>gui/&lt;uid&gt;</code></td></tr>
-  <tr><td>Install root</td><td><code>/opt/observability</code></td><td><code>~/tools/observability</code></td></tr>
-  <tr><td>Labels</td><td><code>com.observability.&lt;service&gt;</code></td><td><code>com.observability.user.&lt;service&gt;</code></td></tr>
-  <tr><td>Starts at boot</td><td>yes</td><td><strong>no</strong></td></tr>
-  <tr><td>Local Network Privacy</td><td>exempt (root daemon)</td><td><strong>applies</strong> to the collector</td></tr>
+  <tr><th>Machine</th><th>Software</th><th>Service labels</th></tr>
+  <tr><td>Monitoring server</td><td>VictoriaMetrics 1.101.0 (metric storage), Grafana 13.2.0 (dashboards)</td><td><code>com.observability.user.victoriametrics</code><br><code>com.observability.user.grafana</code></td></tr>
+  <tr><td>Workers</td><td>OpenTelemetry Collector Contrib 0.159.0, SSH state collector</td><td><code>com.observability.user.otelcol</code><br><code>com.observability.user.sshstate</code></td></tr>
 </table>
 
-<p>Unchanged from <code>main</code>: VictoriaMetrics <code>1.101.0</code>, Grafana <code>13.2.0</code>, otelcol-contrib <code>0.159.0</code> (pinned, checksum-verified); host metrics (CPU, memory, disk, filesystem, network, load); latency via <code>tcp_check</code>; SSH state; the Fleet Overview and Mac Mini Detail dashboards.</p>
+<p><strong>Collected:</strong> CPU, memory, disk, filesystem, network and load; network latency to the monitoring server; SSH service and session state. <strong>Dashboards:</strong> Fleet Overview and Mac Mini Detail.</p>
 
-<h2>2. Architecture and ports</h2>
-<pre><code>Worker Mac Minis (user/&lt;uid&gt;)
-  com.observability.user.otelcol    hostmetrics + tcp_check + SSH state
-  com.observability.user.sshstate   every 30 s
-        |
-        |  OTLP/HTTP  http://&lt;monitoring-mac&gt;:&lt;victoriametrics_port&gt;/opentelemetry/v1/metrics
-        v
-Monitoring Mac (user/&lt;uid&gt;)
-  com.observability.user.victoriametrics
-  com.observability.user.grafana     datasource uid "victoriametrics" -&gt; localhost:&lt;victoriametrics_port&gt;</code></pre>
-
+<h3>Ports</h3>
 <table>
-  <tr><th>Component</th><th>Normal mode</th><th>Side-by-side mode</th><th>Old system-level stack</th></tr>
-  <tr><td>VictoriaMetrics (monitoring Mac)</td><td><code>8428</code></td><td><code>8429</code></td><td><code>8428</code></td></tr>
-  <tr><td>Grafana (monitoring Mac)</td><td><code>3000</code></td><td><code>3001</code></td><td><code>3000</code></td></tr>
-  <tr><td>Collector internal metrics (loopback, workers)</td><td><code>18888</code></td><td><code>18888</code></td><td><code>8888</code></td></tr>
-  <tr><td>SSH (all Macs, Ansible transport)</td><td><code>22</code></td><td><code>22</code></td><td><code>22</code></td></tr>
+  <tr><th>Port</th><th>Where</th><th>Purpose</th></tr>
+  <tr><td><code>8429</code></td><td>Monitoring server</td><td>VictoriaMetrics: metric ingestion from workers, and queries</td></tr>
+  <tr><td><code>3001</code></td><td>Monitoring server</td><td>Grafana web UI</td></tr>
+  <tr><td><code>18888</code></td><td>Each worker, localhost only</td><td>Collector self-monitoring metrics</td></tr>
+  <tr><td><code>22</code></td><td>All Macs</td><td>SSH, used by Ansible</td></tr>
 </table>
 
-<h2>3. Prerequisites</h2>
+<h3>Install locations</h3>
+<table>
+  <tr><th>Path</th><th>Contents</th></tr>
+  <tr><td><code>~/tools/observability/</code></td><td>Binaries, configuration, data and logs (<code>var/log/</code>)</td></tr>
+  <tr><td><code>~/Library/LaunchAgents/</code></td><td>Service definitions (<code>com.observability.user.*.plist</code>)</td></tr>
+</table>
+
+<h2>2. Prerequisites</h2>
 <ul>
-  <li>Ansible control machine with the full <code>ansible</code> package (not bare <code>ansible-core</code>; <code>ansible.cfg</code> uses the <code>community.general</code> yaml callback).</li>
-  <li>SSH access to every Mac as the deployment user. No sudo needed.</li>
-  <li><code>inventories/production/hosts.yml</code> filled in: exactly one host in <code>monitoring_server</code> with <code>ansible_host</code> set, the rest in <code>monitored_nodes</code>. The committed file holds <code>REPLACE_WITH_*</code> placeholders; keep real addresses out of Git.</li>
-  <li>Workers must reach the monitoring Mac on the VictoriaMetrics port, and the collector needs the Local Network privilege if the two are on the same subnet (section 7).</li>
+  <li>An Ansible control machine with the full <code>ansible</code> package installed.</li>
+  <li>SSH access to every Mac as the deployment user.</li>
+  <li><code>inventories/production/hosts.yml</code> completed: one host under <code>monitoring_server</code> (with <code>ansible_host</code>), all others under <code>monitored_nodes</code>.</li>
+  <li>Workers can reach the monitoring server on port <code>8429</code>.</li>
+  <li>Each worker's collector has the macOS <strong>Local Network</strong> permission (see <a href="#known-issue">Known issue</a>).</li>
 </ul>
 
-<h2>4. Deploy</h2>
-<pre><code># Static checks, no hosts touched
+<h2>3. Deployment</h2>
+<p>Run from the repository root on the control machine. Never add <code>--ask-become-pass</code>.</p>
+<pre><code># 1. Check the playbook and connectivity
 ansible-playbook site.yml --syntax-check
-ansible-lint
-
-# Connectivity
 ansible all -m ping
 
-# Everything (as the normal user, never --ask-become-pass)
-ansible-playbook -i inventories/production/hosts.yml site.yml
+# 2. Deploy the monitoring server
+ansible-playbook -i inventories/production/hosts.yml site.yml --tags server -e observability_side_by_side=true
 
-# Server first, then one worker, then the rest
-ansible-playbook -i inventories/production/hosts.yml site.yml --tags server
-ansible-playbook -i inventories/production/hosts.yml site.yml --tags agent --limit &lt;worker&gt;
-ansible-playbook -i inventories/production/hosts.yml site.yml --tags agent
+# 3. Deploy one worker and confirm its metrics appear
+ansible-playbook -i inventories/production/hosts.yml site.yml --tags agent -e observability_side_by_side=true --limit &lt;worker&gt;
 
-# Health/verification only
-ansible-playbook -i inventories/production/hosts.yml site.yml --tags verify</code></pre>
+# 4. Deploy the remaining workers
+ansible-playbook -i inventories/production/hosts.yml site.yml --tags agent -e observability_side_by_side=true</code></pre>
+<p><code>observability_side_by_side=true</code> selects ports 8429 and 3001. Use the same value for the server and every worker. Each run checks the target first, installs or updates only what changed, and finishes with automatic verification. Runs are safe to repeat.</p>
 
-<p>Each role runs: preflight checks &rarr; install/configure &rarr; restart changed services &rarr; verify. Preflight fails, before writing anything, if the play runs as root or with become, the per-user launchd domain is missing, the old system-level stack is present without side-by-side mode, or a needed port is taken.</p>
-
-<h2>5. Verify</h2>
-<p>The agent play ends with an end-to-end check against VictoriaMetrics. To check by hand:</p>
-<pre><code># On the monitoring Mac: hosts reporting memory metrics
-curl -s 'http://127.0.0.1:&lt;victoriametrics_port&gt;/api/v1/query' \
+<h2>4. Verification</h2>
+<p>The playbook verifies each Mac automatically. To check manually:</p>
+<pre><code># Monitoring server: hosts currently sending memory metrics
+curl -s 'http://127.0.0.1:8429/api/v1/query' \
   --data-urlencode 'query=count by (host_name) (system_memory_usage_bytes)'
 
-# Total series ingested (must not be empty)
-curl -s 'http://127.0.0.1:&lt;victoriametrics_port&gt;/api/v1/query' \
-  --data-urlencode 'query=count({__name__=~".+"})'
-
-# On a worker: the collector's own counters
+# Worker: collector counters (exported should rise, failed should stay flat)
 curl -s http://127.0.0.1:18888/metrics \
   | grep -E '^otelcol_(receiver_accepted|exporter_sent|exporter_send_failed)_metric_points'
 
-# On any Mac: agent state
+# Any Mac: service state
 launchctl print user/$(id -u)/com.observability.user.otelcol | grep -E 'state|pid'</code></pre>
-
 <div class="panel info">
-  A <code>/health</code> 200, or a 400 for an empty POST, only shows that VictoriaMetrics answers. Metrics are arriving only when <code>count by (host_name) (system_memory_usage_bytes)</code> lists the worker and <code>otelcol_exporter_sent_metric_points</code> rises.
+  A worker is reporting correctly only when it appears in the <code>host_name</code> query and its <code>otelcol_exporter_sent_metric_points</code> count rises. A successful <code>/health</code> response alone does not confirm that metrics are being received.
 </div>
+<p>Then open Grafana at <code>http://&lt;monitoring-server&gt;:3001</code> and check that the worker appears on the Fleet Overview dashboard.</p>
 
-<h2>6. Side-by-side with the old system-level stack</h2>
-<p>Where the old <code>main</code> deployment is still running and cannot be removed, enable side-by-side mode <strong>fleet-wide</strong> so the server and every worker agree on the port:</p>
-<pre><code>ansible-playbook -i inventories/production/hosts.yml site.yml -e observability_side_by_side=true
-# or set observability_side_by_side: true in inventories/production/group_vars/all.yml</code></pre>
+<h2 id="known-issue">5. Known issue: worker metrics blocked by Local Network Privacy</h2>
+
+<h3>Symptom</h3>
 <ul>
-  <li>The new VictoriaMetrics moves to <code>8429</code> and Grafana to <code>3001</code>; datasource and every collector follow.</li>
-  <li>The new collector's internal metrics stay on <code>127.0.0.1:18888</code>; the old collector keeps <code>8888</code>.</li>
-  <li>The old stack is only ever <em>read</em> (plist stat, <code>launchctl print system/&lt;label&gt;</code>). Nothing under <code>/Library/LaunchDaemons</code> or <code>/opt/observability</code> is stopped, unloaded, modified or deleted, and VictoriaMetrics data is never shared.</li>
-  <li>Re-run <strong>both</strong> plays when toggling the mode.</li>
+  <li>The worker collector is running and collecting data, but nothing arrives in VictoriaMetrics.</li>
+  <li><code>~/tools/observability/var/log/otelcol.err.log</code> repeats <code>connect: no route to host</code> for the monitoring server.</li>
+  <li>Manual tests over SSH (<code>curl</code>, <code>ping</code>) to the same address succeed.</li>
+  <li>The deployment fails at <em>Wait for host metrics to arrive in VictoriaMetrics</em>, with a message naming Local Network Privacy.</li>
 </ul>
 
-<h2 id="known-issue">7. Known issue: Local Network Privacy blocks the worker collector</h2>
-
-<div class="panel error">
-  <strong>Symptom.</strong> The worker collector LaunchAgent is running and collecting metrics, but none reach VictoriaMetrics. Its error log repeats <code>dial tcp &lt;monitoring-mac&gt;:&lt;port&gt;: connect: no route to host</code> for both <code>otlphttp</code> and <code>tcp_check</code>. Yet <code>curl</code> to the same address over SSH returns 200, ping and ARP are fine, and the old root collector keeps working. <code>launchctl kickstart</code> changes nothing. The agent play fails at <em>Wait for host metrics to arrive in VictoriaMetrics</em> with a message naming Local Network Privacy.
-</div>
-
-<h3>Observed on the first side-by-side deployment</h3>
-<table>
-  <tr><th>Collector counter (worker, <code>127.0.0.1:18888</code>)</th><th>Value</th></tr>
-  <tr><td><code>otelcol_receiver_accepted_metric_points{receiver="hostmetrics"}</code></td><td>27,675</td></tr>
-  <tr><td><code>otelcol_receiver_accepted_metric_points{receiver="tcp_check/monitoring_server"}</code></td><td>248</td></tr>
-  <tr><td><code>otelcol_receiver_accepted_metric_points{receiver="otlp_json_file/ssh_state"}</code></td><td>335</td></tr>
-  <tr><td><code>otelcol_exporter_send_failed_metric_points{exporter="otlphttp"}</code></td><td>8,277</td></tr>
-  <tr><td>Hostmetrics scraper errors</td><td>0</td></tr>
-</table>
-<p>Collection works; only the outgoing connection from the LaunchAgent fails.</p>
-
 <h3>Cause</h3>
-<p>Since macOS 15, programs need the <em>Local Network</em> privilege to open connections to addresses on a directly attached subnet. Apple's <a href="https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy">TN3179</a> lists what macOS allows automatically: any launchd daemon, any program running as root, and command-line tools run from Terminal or over SSH (and their children). It adds: <em>"The exception for launchd daemons doesn't apply to launchd agents."</em> A blocked TCP connect fails with <code>EHOSTUNREACH</code>, which Go prints as <code>no route to host</code>.</p>
+<p>Since macOS 15, an application needs the <strong>Local Network</strong> permission to connect to other devices on the same subnet. Commands run over SSH are exempt, which is why manual tests succeed. Background LaunchAgents such as the collector are not exempt (<a href="https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy">Apple TN3179</a>). macOS reports the blocked connection as "no route to host". The network, ports and VictoriaMetrics are working correctly.</p>
 
+<div class="panel warn">
+  This diagnosis matches all observed evidence but has not yet been confirmed on a Mac Mini.
+</div>
+
+<h3>Confirm (read-only, on the worker)</h3>
+<pre><code>sw_vers                                                   # macOS 15 or later
+nc -vz -G 3 &lt;monitoring-server-ip&gt; 8429                  # succeeds over SSH
+grep -c 'no route to host' ~/tools/observability/var/log/otelcol.err.log</code></pre>
+
+<h3>Resolution</h3>
+<p>The permission can only be granted at the Mac itself or by an administrator; the playbook does not bypass it. Choose one:</p>
 <table>
-  <tr><th>Process on the worker</th><th>Local Network Privacy</th><th>Result</th></tr>
-  <tr><td>Old collector (root LaunchDaemon)</td><td>exempt</td><td>works</td></tr>
-  <tr><td><code>curl</code> / <code>nc</code> / Ansible tasks over SSH</td><td>exempt</td><td>works</td></tr>
-  <tr><td>New collector (<code>com.observability.user.otelcol</code>, LaunchAgent)</td><td>needs the privilege</td><td><strong>no route to host</strong> until granted</td></tr>
+  <tr><th>Option</th><th>Performed by</th><th>Steps</th></tr>
+  <tr>
+    <td><strong>A. Allow the collector</strong></td>
+    <td>Deployment user, at the Mac's screen</td>
+    <td>Log in on the worker as the deployment user. Allow <code>otelcol-contrib</code> when macOS asks, or enable it under <em>System Settings &rarr; Privacy &amp; Security &rarr; Local Network</em>. Re-run the worker deployment. Repeat after each collector upgrade.</td>
+  </tr>
+  <tr>
+    <td><strong>B. Allow the monitoring server's address</strong></td>
+    <td>IT / administrator</td>
+    <td>On each worker run the command below, restart the Mac, then re-run the worker deployment.
+<pre><code>sudo defaults write com.apple.network.local-network \
+  AllowedEthernetLocalNetworkAddresses -array-add "&lt;monitoring-server-ip&gt;/32"</code></pre>
+    For Wi-Fi, use <code>AllowedWiFiLocalNetworkAddresses</code>. Requires macOS 15.5 or later.</td>
+  </tr>
+</table>
+<p>Option B is recommended for the fleet: it is applied once per Mac and does not need repeating after upgrades.</p>
+
+<h2>6. Operations</h2>
+<table>
+  <tr><th>Task</th><th>Command</th></tr>
+  <tr><td>Check status</td><td><code>launchctl list | grep com.observability.user</code></td></tr>
+  <tr><td>Restart a service</td><td><code>launchctl kickstart -k user/$(id -u)/com.observability.user.otelcol</code></td></tr>
+  <tr><td>View logs</td><td><code>tail -f ~/tools/observability/var/log/otelcol.err.log</code></td></tr>
+  <tr><td>Validate collector config</td><td><code>~/tools/observability/bin/otelcol-contrib validate --config=$HOME/tools/observability/etc/otel-config.yaml</code></td></tr>
+  <tr><td>Restore a Mac to its intended state</td><td>Re-run the deployment with <code>--limit &lt;host&gt;</code></td></tr>
 </table>
 
 <div class="panel warn">
-  <strong>Status:</strong> this diagnosis fits all the evidence but has not yet been confirmed on a Mac Mini. It does not apply when the monitoring Mac is reached through a router (a different subnet).
+  <strong>After a reboot:</strong> LaunchAgents do not start automatically at boot. Re-run the deployment for that Mac (<code>--limit &lt;host&gt;</code>).
 </div>
 
-<h3>Confirm on a worker (read-only, no sudo)</h3>
-<pre><code>sw_vers                                                    # macOS 15 or later?
-nc -vz -G 3 &lt;monitoring-mac-ip&gt; &lt;victoriametrics_port&gt;    # over SSH: expected to succeed
-curl -s http://127.0.0.1:18888/metrics \
-  | grep -E '^otelcol_exporter_(sent|send_failed)_metric_points'   # sent flat, failed rising
-grep 'no route to host' ~/tools/observability/var/log/otelcol.err.log | tail -2   # current timestamps</code></pre>
-
-<h3>Remediation (needs the console user or an administrator)</h3>
-<p>The playbook cannot grant this privilege and deliberately does not work around the policy.</p>
+<h2>7. Troubleshooting</h2>
 <table>
-  <tr><th>Option</th><th>Who</th><th>Steps</th><th>Caveats</th></tr>
-  <tr>
-    <td>1. Grant the privilege per worker</td>
-    <td>Deployment user, at the console. No sudo.</td>
-    <td>Log in at the worker's console as the deployment user while the collector agent is running. Allow <code>otelcol-contrib</code> in the Local Network alert, or enable it under <em>System Settings &rarr; Privacy &amp; Security &rarr; Local Network</em>. Then re-run the agent play for that Mac.</td>
-    <td>The release binary is ad-hoc signed (<code>Identifier=a.out</code>); macOS tracks the privilege by code signature, so expect to grant it again after each collector upgrade. One Mac at a time. Not yet confirmed on a Mac Mini.</td>
-  </tr>
-  <tr>
-    <td>2. Exempt the monitoring Mac's address</td>
-    <td>Administrator / IT</td>
-    <td><pre><code>sudo defaults write com.apple.network.local-network \
-  AllowedEthernetLocalNetworkAddresses -array-add "&lt;monitoring-mac-ip&gt;/32"
-# Wi-Fi: AllowedWiFiLocalNetworkAddresses</code></pre>Restart the worker, then re-run the agent play (LaunchAgents do not start at boot).</td>
-    <td>macOS 15.5+. Applies to every program on that Mac for that one address. Apple states MDM cannot configure Local Network Privacy; this preference is the documented per-Mac route.</td>
-  </tr>
-  <tr>
-    <td>3. Use the system-level deployment</td>
-    <td>Administrator</td>
-    <td>Deploy <code>main</code> (root LaunchDaemon), which is exempt.</td>
-    <td>Needs sudo; that is what this branch avoids.</td>
-  </tr>
+  <tr><th>Symptom</th><th>Action</th></tr>
+  <tr><td><code>no route to host</code> in the collector log, SSH tests succeed</td><td>Grant the Local Network permission (section 5).</td></tr>
+  <tr><td>Deployment stops: port already in use</td><td>Find the process with <code>lsof -nP -iTCP:&lt;port&gt; -sTCP:LISTEN</code>.</td></tr>
+  <tr><td>Deployment stops: launchd domain not available</td><td>Run <code>launchctl print user/$(id -u)</code> on that Mac as the deployment user.</td></tr>
+  <tr><td>Service loaded but not running</td><td>Read <code>~/tools/observability/var/log/&lt;service&gt;.err.log</code>.</td></tr>
+  <tr><td>Worker missing after a reboot</td><td>Expected; re-run the deployment for that Mac.</td></tr>
+  <tr><td>SSH session count lower than TCP connections</td><td>Expected; some sessions cannot be attributed to a user without admin rights.</td></tr>
 </table>
 
-<h3>Fixed alongside: collector port clash on 8888</h3>
-<p>Earlier builds of this branch left the collector's internal telemetry on its default <code>127.0.0.1:8888</code>, which the old collector already holds, so the new collector exited with <code>bind: address already in use</code>. It now uses <code>otel_internal_metrics_port</code> (<code>18888</code>), checked by preflight and kept distinct from <code>8888</code> in side-by-side mode.</p>
-
-<h2>8. LaunchAgent lifecycle</h2>
-<table>
-  <tr><th>Event</th><th><code>launchd_domain_type: user</code> (default)</th><th><code>gui</code></th></tr>
-  <tr><td>Playbook over SSH</td><td>Loads into <code>user/&lt;uid&gt;</code>; works without a console login.</td><td>Only while the user is logged in at the console.</td></tr>
-  <tr><td>Agent exits</td><td>Restarted (<code>KeepAlive</code>).</td><td>Same.</td></tr>
-  <tr><td>SSH session ends / logout</td><td>Not yet verified on Mac Minis.</td><td>Agents stop at console logout.</td></tr>
-  <tr><td>Reboot</td><td><strong>Nothing starts.</strong> Re-run the play for that Mac.</td><td>Starts at console login (with auto-login: effectively at boot).</td></tr>
-  <tr><td>Repeated runs</td><td>Idempotent; only services whose files changed restart.</td><td>Same.</td></tr>
-</table>
-
-<h2>9. SSH telemetry without root</h2>
-<table>
-  <tr><th>Metric</th><th>Status</th></tr>
-  <tr><td><code>ssh_remote_login_enabled</code>, <code>ssh_port_listening</code>, <code>ssh_service_up</code></td><td>Fully preserved</td></tr>
-  <tr><td><code>ssh_sessions</code>, per-session user / source / tty / login time</td><td>Partially preserved: sessions are attributed via <code>netstat -anv</code> and <code>who</code>; another user's scp/sftp session may go unattributed.</td></tr>
-  <tr><td><code>ssh_connections</code> (new)</td><td>All established connections on the SSH port; compare with <code>ssh_sessions</code>.</td></tr>
-  <tr><td>Terminal contents, commands, keystrokes</td><td>Never collected.</td></tr>
-</table>
-
-<h2>10. Operating the agents</h2>
-<pre><code># Status
-launchctl print user/$(id -u)/com.observability.user.otelcol
-launchctl list | grep com.observability.user
-
-# Restart in place
-launchctl kickstart -k user/$(id -u)/com.observability.user.otelcol
-
-# Logs
-tail -f ~/tools/observability/var/log/otelcol.err.log
-
-# Validate plists and collector config
-plutil -lint ~/Library/LaunchAgents/com.observability.user.*.plist
-~/tools/observability/bin/otelcol-contrib validate --config=$HOME/tools/observability/etc/otel-config.yaml</code></pre>
-<p>Re-running the play (optionally <code>--limit &lt;host&gt;</code>) always returns a Mac to its intended state. To remove the stack from a Mac (no sudo): boot out each <code>com.observability.user.*</code> label, delete the four plists from <code>~/Library/LaunchAgents</code>, then delete <code>~/tools/observability</code>.</p>
-
-<h2>11. Troubleshooting</h2>
-<table>
-  <tr><th>Symptom</th><th>Check / fix</th></tr>
-  <tr><td><code>no route to host</code> from the collector, <code>curl</code> over SSH works</td><td>Local Network Privacy (section 7). Not a port, IP or VictoriaMetrics problem.</td></tr>
-  <tr><td>Collector restarting, <code>bind: address already in use</code> on 8888</td><td>Old config without the telemetry block. Re-run the agent play; it renders port 18888.</td></tr>
-  <tr><td>Preflight: found the system-level deployment</td><td>Enable <code>observability_side_by_side</code>, or have an admin remove the old stack.</td></tr>
-  <tr><td>Preflight: port already in use</td><td><code>lsof -nP -iTCP:&lt;port&gt; -sTCP:LISTEN</code>; usually the old stack.</td></tr>
-  <tr><td>Preflight: domain not available</td><td><code>launchctl print user/$(id -u)</code> on that Mac; for <code>gui</code> the user must be logged in at the console.</td></tr>
-  <tr><td><code>Bootstrap failed: 5: Input/output error</code></td><td>Plist without <code>LimitLoadToSessionType</code>, or a bootstrap racing a bootout. The role sets the key and retries.</td></tr>
-  <tr><td>Worker vanished after a reboot</td><td>Expected for the <code>user</code> domain. Re-run <code>--limit &lt;host&gt; --tags agent</code>.</td></tr>
-  <tr><td>SSH sessions lower than TCP connections</td><td>Expected for sessions an unprivileged collector cannot attribute.</td></tr>
-</table>
-
-<h2>12. Validation status</h2>
+<h2>8. Validation status</h2>
 <div class="panel ok">
-  <strong>Verified on one Apple Silicon Mac (macOS 27, no sudo, local connection):</strong> syntax check and ansible-lint pass; full playbook <code>failed=0</code> and a second run <code>changed=0</code>; side-by-side mode on 8429 / 3001 / 18888 with a stand-in listener on 8888; host metrics ingested with the expected <code>host_name</code>; every dashboard panel returns data; preflight guards fail before writing anything.
-</div>
-<div class="panel info">
-  <strong>Reported from the monitoring Mac deployment (side-by-side):</strong> VictoriaMetrics on 8429 and Grafana on 3001 running as LaunchAgents, datasource and both dashboards provisioned, server verification passed, old stack on 8428 / 3000 untouched.
+  <strong>Verified:</strong> full deployment on a test Mac without sudo, with host metrics ingested, all dashboard panels returning data, and repeat runs making no changes. Monitoring server deployed on the fleet, with VictoriaMetrics, Grafana, datasource and both dashboards running.
 </div>
 <div class="panel warn">
-  <strong>Not yet verified on Mac Minis:</strong> worker metrics reaching the new VictoriaMetrics (blocked, section 7); the Local Network Privacy remediation; agents surviving the end of the SSH session, logout and reboot; SSH state against a real sshd with live sessions; 20+ hosts at once.
+  <strong>Pending:</strong> worker metrics reaching the monitoring server (section 5); service behaviour across logout and reboot; SSH telemetry against live sessions; rollout to the full fleet.
 </div>
 
 <h2>References</h2>
 <ul>
-  <li>Repository docs: <code>README.md</code>, <code>docs/LAUNCHAGENT_VARIANT.md</code>, <code>docs/KT_GUIDE.md</code>, <code>docs/PROJECT_FLOW.md</code></li>
-  <li>Apple TN3179: <a href="https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy">Understanding local network privacy</a></li>
+  <li>Repository documentation: <code>README.md</code>, <code>docs/LAUNCHAGENT_VARIANT.md</code></li>
+  <li><a href="https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy">Apple TN3179: Understanding local network privacy</a></li>
 </ul>
 
 </body>

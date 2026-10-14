@@ -135,6 +135,7 @@ The old system-level stack may still be running on some Macs (for example MM7 as
 | --- | --- | --- |
 | VictoriaMetrics | `:8428`, `/opt/observability/var/victoriametrics` | `:8429`, `~/tools/observability/var/victoriametrics` |
 | Grafana | `:3000` | `:3001` |
+| Collector internal metrics (loopback) | `127.0.0.1:8888` (collector default) | `127.0.0.1:18888` (`otel_internal_metrics_port`, in every mode) |
 | Labels | `com.observability.*` in `system` | `com.observability.user.*` in `user/<uid>` |
 | Collector target | old VictoriaMetrics `:8428` | new VictoriaMetrics `:8429` |
 
@@ -160,9 +161,54 @@ What preflight enforces:
 
 - **Mode off, old stack found** (its plists in `/Library/LaunchDaemons` or its labels loaded in `system`): fail, naming what was found. Two copies on one Mac would fight over 8428/3000 or double-report metrics.
 - **Mode on:** the new VictoriaMetrics and Grafana ports must differ from the old ones (`observability_legacy_victoriametrics_port` / `_grafana_port`), the new labels must differ from the old labels, and `base_dir` must not be inside `/opt/observability`. So the two can never share a port or a storage directory.
+- **Mode on, worker:** the collector's internal metrics port must differ from `observability_legacy_otel_internal_metrics_port` (8888). A second collector on 8888 does not start (`bind: address already in use`).
 - **Either mode:** if a port is already taken before our agent is loaded, fail and name the port. The agent would otherwise crash-loop under `KeepAlive`.
 
 Disable side-by-side mode (`observability_side_by_side: false`, the default) for a normal deployment on 8428/3000 once the old stack is gone. Re-run **both** plays when you toggle it, because collector configs must be re-rendered with the new port. VictoriaMetrics data does not move between the two stacks.
+
+## Local Network Privacy (why a worker can get "no route to host")
+
+macOS 15 and later control which programs may connect to addresses on a directly attached network: the same Ethernet or Wi-Fi subnet, not reached through a router. Apple's [TN3179](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy) lists which programs macOS allows automatically:
+
+- any daemon started by launchd;
+- any program running as root;
+- command-line tools run from Terminal or over SSH, and their child processes.
+
+It adds: "The exception for launchd daemons doesn't apply to launchd agents." A blocked outgoing TCP connect fails with `EHOSTUNREACH`, which Go prints as `connect: no route to host`.
+
+That splits this project down the middle when the monitoring Mac and a worker share a subnet:
+
+| Process | Local Network Privacy | Reaches the monitoring Mac |
+| --- | --- | --- |
+| System-level collector (`main`, root LaunchDaemon) | exempt | yes |
+| `curl`/`nc` run over SSH or by an Ansible task | exempt | yes |
+| This branch's collector (`com.observability.user.otelcol`, LaunchAgent) | needs the Local Network privilege | only after it is granted |
+
+The symptom is consistent: `otelcol_receiver_accepted_metric_points` rises, `otelcol_exporter_send_failed_metric_points` rises, `otelcol_exporter_sent_metric_points` stays at zero, and both `otlphttp` and `tcp_check` log `no route to host`. Meanwhile every manual test over SSH succeeds, and `launchctl kickstart` changes nothing. Agent verification spots this and fails with this diagnosis.
+
+There are two fixes. Neither can be applied by this playbook, because granting the privilege needs the console or an administrator, and the playbook does not try to get around the policy:
+
+1. **Per user, no sudo:** log in at the worker's console as the deployment user, with the collector LaunchAgent running. Allow `otelcol-contrib` when macOS shows the Local Network alert, or switch it on under System Settings > Privacy & Security > Local Network; the program is added to the list after it first tries to connect. Two limits:
+   - The release binary is ad-hoc signed (`codesign -dv` shows `Signature=adhoc`, `Identifier=a.out`). macOS tracks this privilege by code signature, so expect to grant it again after every collector version bump.
+   - It has to be done on every worker.
+2. **Per Mac, administrator:** treat the monitoring Mac's address as non-local for every program. Restart afterwards, as Apple's note requires, then re-run the agent play: LaunchAgents do not start at boot.
+   ```bash
+   sudo defaults write com.apple.network.local-network AllowedEthernetLocalNetworkAddresses -array-add "<monitoring-mac-ip>/32"
+   # Wi-Fi: AllowedWiFiLocalNetworkAddresses
+   ```
+   Apple says MDM cannot configure Local Network Privacy itself. These defaults (macOS 15.5+) are the documented way to set it per Mac.
+
+The system-level deployment on `main` (a root LaunchDaemon) is not affected. The per-user fix has not yet been confirmed on a Mac Mini.
+
+To confirm the diagnosis on a worker without changing anything, compare the two contexts at the same moment:
+
+```bash
+# Over SSH: exempt, should connect
+nc -vz -G 3 <monitoring-mac-ip> 8429
+# The LaunchAgent's own view
+curl -s http://127.0.0.1:18888/metrics | grep -E '^otelcol_exporter_(sent|send_failed)_metric_points'
+grep -c 'no route to host' ~/tools/observability/var/log/otelcol.err.log
+```
 
 ## Operating the LaunchAgents
 
@@ -202,7 +248,9 @@ To remove this stack from a Mac (user-owned only, so no sudo): boot out each `co
 | Preflight: port already in use | `lsof -nP -iTCP:<port> -sTCP:LISTEN`. Usually the old stack; use side-by-side mode or other ports. |
 | `Bootstrap failed: 5: Input/output error` | Usually a plist without `LimitLoadToSessionType` being loaded into `user/<uid>`, or a bootstrap racing a bootout. The role sets the key and retries; check `plutil -lint` and the label is not loaded twice. |
 | Agent loaded but `state = waiting` / restarting | Read `~/tools/observability/var/log/<service>.err.log`; confirm the `ProgramArguments` paths exist. |
-| No metrics from a worker | Collector log, `curl http://<monitoring-mac>:<victoriametrics_port>/health` from the worker, and whether side-by-side mode is set identically for the server and the workers. |
+| No metrics from a worker, `no route to host` in `otelcol.err.log` while `curl` over SSH works | Local Network Privacy blocking the collector LaunchAgent; see the section above. Not a port, IP or VictoriaMetrics problem. |
+| No metrics from a worker, other errors | Collector log, `curl -s http://127.0.0.1:18888/metrics` (accepted vs exported vs failed points), and whether side-by-side mode is set identically for the server and the workers. |
+| Collector restarting, `bind: address already in use` on 8888 | A collector config without the `service.telemetry` block, colliding with the system-level collector. Re-render with this role; it uses `otel_internal_metrics_port` (18888). |
 | Worker vanished after a reboot | Expected for `user` domain: re-run `--limit <host> --tags agent`, or use `gui` + auto-login. |
 | SSH sessions lower than TCP connections | Expected for sessions the unprivileged collector cannot attribute; see the capability matrix above. |
 

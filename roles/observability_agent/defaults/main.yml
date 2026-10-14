@@ -55,6 +55,16 @@ otel_collector_install_dir: "{{ bin_dir }}/otelcol-contrib-{{ otel_collector_ver
 
 otel_collection_interval: 15s
 
+# The collector's own telemetry (otelcol_receiver_accepted_metric_points,
+# otelcol_exporter_sent/send_failed_metric_points, ...), served on loopback
+# only at http://127.0.0.1:<port>/metrics. The collector's built-in default is
+# 8888, which the system-level collector already holds on Macs running it; a
+# second collector on 8888 fails to start ("address already in use") and
+# KeepAlive restarts it forever. 18888 keeps the two apart in every mode, and
+# preflight checks it is free. Agent verification reads it to tell "nothing
+# scraped" from "scraped but not exported".
+otel_internal_metrics_port: 18888
+
 # Network latency from each monitored Mac to the monitoring Mac. The tcp_check
 # receiver times a TCP connect to VictoriaMetrics (monitoring_server_address:
 # victoriametrics_port) every otel_collection_interval - the same host and port

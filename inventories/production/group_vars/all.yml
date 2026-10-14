@@ -24,6 +24,8 @@ observability_legacy_base_dir: /opt/observability
 observability_legacy_launch_daemons_dir: /Library/LaunchDaemons
 observability_legacy_victoriametrics_port: 8428
 observability_legacy_grafana_port: 3000
+# The system-level collector's internal telemetry endpoint (collector default).
+observability_legacy_otel_internal_metrics_port: 8888
 
 victoriametrics_port: "{{ observability_side_by_side_victoriametrics_port if observability_side_by_side | bool else 8428 }}"
 

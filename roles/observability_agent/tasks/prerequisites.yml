@@ -14,9 +14,9 @@
 
 # Read-only checks: unprivileged user, per-user launchd domain present, no
 # clash with a system-level deployment. Nothing is written until they pass.
-# The collector only sends, so it claims no local port; the VictoriaMetrics
-# port it targets must still differ from the system-level one in side-by-side
-# mode.
+# The collector listens only on its loopback telemetry port, which must be
+# free (the system-level collector holds 8888); the VictoriaMetrics port it
+# targets must also differ from the system-level one in side-by-side mode.
 - name: Run the LaunchAgent / no-sudo preflight checks
   ansible.builtin.include_role:
     name: observability_common
@@ -25,9 +25,10 @@
     observability_service_labels:
       - "{{ otel_collector_launchd_label }}"
       - "{{ otel_ssh_state_launchd_label }}"
-    observability_service_ports: {}
+    observability_service_ports: "{{ {otel_collector_launchd_label: otel_internal_metrics_port | int} }}"
     observability_side_by_side_port_pairs:
       - {name: VictoriaMetrics (export target), port: "{{ victoriametrics_port }}", legacy_port: "{{ observability_legacy_victoriametrics_port }}"}
+      - {name: Collector internal metrics, port: "{{ otel_internal_metrics_port }}", legacy_port: "{{ observability_legacy_otel_internal_metrics_port }}"}
 
 - name: Create the observability directory layout
   ansible.builtin.include_role:

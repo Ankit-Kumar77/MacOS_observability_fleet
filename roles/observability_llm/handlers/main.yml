@@ -1,0 +1,7 @@
+---
+- name: Restart MLX telemetry agent
+  ansible.builtin.include_tasks:
+    file: "{{ role_path }}/../observability_common/tasks/launchd_restart.yml"
+  vars:
+    launchd_service_label: "{{ mlx_telemetry_launchd_label }}"
+    launchd_service_plist: "{{ mlx_telemetry_launchd_plist }}"

@@ -1,0 +1,95 @@
+---
+# Same read-only guards as the other roles (unprivileged, per-user launchd
+# domain present, the proxy port free before the agent is first loaded). This
+# role has no system-level counterpart, so there is no old stack to detect.
+- name: Run the LaunchAgent / no-sudo preflight checks
+  ansible.builtin.include_role:
+    name: observability_common
+    tasks_from: preflight
+  vars:
+    observability_service_labels:
+      - "{{ mlx_telemetry_launchd_label }}"
+    observability_service_ports: "{{ {mlx_telemetry_launchd_label: mlx_telemetry_port | int} if llm_metrics_enabled | bool else {} }}"
+    observability_legacy_daemon_labels: []
+    observability_side_by_side_port_pairs: []
+
+- name: Assert the MLX telemetry settings are consistent
+  ansible.builtin.assert:
+    that:
+      - mlx_server_port | int > 0
+      - mlx_telemetry_port | int > 0
+      - llm_otlp_receiver_port is defined
+      - not (llm_metrics_enabled | bool) or (mlx_telemetry_port | int != mlx_server_port | int)
+      - mlx_telemetry_port | int != llm_otlp_receiver_port | int
+      - llm_otel_endpoint is match('http://(127\.0\.0\.1|localhost|\[::1\]):')
+    fail_msg: >-
+      mlx_telemetry_port ({{ mlx_telemetry_port }}) must differ from the MLX-LM
+      server port ({{ mlx_server_port }}) and from the collector's loopback OTLP
+      receiver (llm_otlp_receiver_port, {{ llm_otlp_receiver_port | default('undefined') }}),
+      and llm_otel_endpoint ({{ llm_otel_endpoint }}) must point at that
+      loopback receiver.
+
+- name: Check the Python interpreter for the telemetry agent
+  ansible.builtin.command:
+    argv:
+      - "{{ llm_telemetry_python }}"
+      - -c
+      - "import sys; print(sys.version_info >= (3, 9))"
+  register: observability_llm_python
+  changed_when: false
+  failed_when: false
+
+- name: Assert the telemetry agent's Python is usable
+  ansible.builtin.assert:
+    that:
+      - observability_llm_python.rc == 0
+      - observability_llm_python.stdout | trim == 'True'
+    fail_msg: >-
+      {{ llm_telemetry_python }} cannot run the MLX telemetry agent (needs
+      Python 3.9+, standard library only; rc={{ observability_llm_python.rc }}).
+      Set llm_telemetry_python to a working python3, for example the
+      interpreter of the MLX-LM virtual environment.
+
+# Runs in this Ansible session on loopback, so it is a deployment sanity check,
+# not a statement about what the LaunchAgent can reach.
+- name: Check that the MLX-LM server answers
+  ansible.builtin.uri:
+    url: "http://{{ mlx_server_host }}:{{ mlx_server_port }}/health"
+    method: GET
+    status_code: 200
+    timeout: 5
+  register: observability_llm_mlx_health
+  failed_when: false
+
+- name: Assert the MLX-LM server is reachable
+  ansible.builtin.assert:
+    that:
+      - observability_llm_mlx_health.status | default(-1) == 200
+    fail_msg: >-
+      MLX-LM did not answer http://{{ mlx_server_host }}:{{ mlx_server_port }}/health
+      (status {{ observability_llm_mlx_health.status | default('none') }}).
+      Start mlx_lm.server (its own LaunchAgent is not managed here), correct
+      mlx_server_host / mlx_server_port for this host, or set
+      llm_require_mlx_reachable: false to install telemetry anyway; the health
+      metrics will then report the server as down.
+  when: llm_require_mlx_reachable | bool
+
+- name: Read the rendered collector configuration
+  ansible.builtin.slurp:
+    src: "{{ etc_dir }}/otel-config.yaml"
+  register: observability_llm_collector_config
+  failed_when: false
+
+- name: Assert the collector has the loopback OTLP receiver
+  ansible.builtin.assert:
+    that:
+      - "'otlp/llm' in (observability_llm_collector_config.content | default('') | b64decode)"
+    fail_msg: >-
+      {{ etc_dir }}/otel-config.yaml has no otlp/llm receiver, so the telemetry
+      agent would have nowhere to export. Run the agent role for this host first
+      (site.yml --tags agent), with llm_observability_enabled true.
+
+- name: Create the observability directory layout
+  ansible.builtin.include_role:
+    name: observability_common
+    tasks_from: base_directories

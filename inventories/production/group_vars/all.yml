@@ -46,3 +46,14 @@ victoriametrics_auth_enabled: false
 # per host/group, or with -e, using get_url's expected keys, e.g.:
 #   -e '{"proxy_env":{"http_proxy":"http://127.0.0.1:9000","https_proxy":"http://127.0.0.1:9000"}}'
 proxy_env: {}
+
+# LLM (MLX-LM) observability, roles/observability_llm. Off fleet-wide; turn it
+# on per host (host_vars) or for a child group of monitored_nodes holding the
+# Macs that run mlx_lm.server. The monitoring Mac provisions the LLM
+# dashboards and alerts as soon as any monitored node has it enabled.
+# See docs/LLM_OBSERVABILITY.md.
+llm_observability_enabled: false
+# Loopback-only OTLP/HTTP receiver that the agent role adds to the collector
+# when llm_observability_enabled is true; the MLX telemetry agent exports to
+# it. Must not clash with otel_internal_metrics_port (18888) or MLX-LM.
+llm_otlp_receiver_port: 14318

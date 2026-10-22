@@ -15,3 +15,8 @@
   tags: ['agent', 'observability']
   roles:
     - observability_agent
+    # MLX-LM telemetry; a no-op unless llm_observability_enabled is true for
+    # the host (and removes its own LaunchAgent if it was turned off). Runs
+    # after observability_agent, which adds the collector receiver it exports to.
+    - role: observability_llm
+      tags: ['llm']

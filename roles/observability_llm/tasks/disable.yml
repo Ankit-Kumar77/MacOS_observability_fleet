@@ -1,0 +1,26 @@
+---
+# Rollback path for llm_observability_enabled: false. Removes only this role's
+# LaunchAgent; the agent's files stay in place (harmless, and re-enabling
+# reuses them). The collector's otlp/llm receiver is removed by the agent role.
+- name: Check whether the MLX telemetry agent is loaded
+  ansible.builtin.command:
+    cmd: "launchctl print {{ item }}/{{ mlx_telemetry_launchd_label }}"
+  loop:
+    - "user/{{ ansible_facts['user_uid'] }}"
+    - "gui/{{ ansible_facts['user_uid'] }}"
+  register: observability_llm_loaded
+  changed_when: false
+  failed_when: false
+
+- name: Unload the MLX telemetry agent
+  ansible.builtin.command:
+    cmd: "launchctl bootout {{ item.item }}/{{ mlx_telemetry_launchd_label }}"
+  loop: "{{ observability_llm_loaded.results | selectattr('rc', 'equalto', 0) | list }}"
+  loop_control:
+    label: "{{ item.item }}"
+  changed_when: true
+
+- name: Remove the MLX telemetry LaunchAgent plist
+  ansible.builtin.file:
+    path: "{{ mlx_telemetry_launchd_plist }}"
+    state: absent

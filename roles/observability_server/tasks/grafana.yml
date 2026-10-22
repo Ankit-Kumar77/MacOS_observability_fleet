@@ -65,6 +65,45 @@
     mode: '0644'
   notify: Restart Grafana
 
+# LLM dashboards: separate files and uids, so the two host dashboards above are
+# never touched. Removed (and so deleted by the provider) when disabled.
+- name: Provision LLM dashboards
+  ansible.builtin.template:
+    src: "{{ item }}.json.j2"
+    dest: "{{ etc_dir }}/grafana/provisioning/dashboards/{{ item }}.json"
+    mode: '0644'
+    validate: "{{ ansible_facts['python']['executable'] }} -c 'import json, sys; json.load(open(sys.argv[1]))' %s"
+  loop: "{{ observability_server_llm_dashboards }}"
+  when: grafana_llm_dashboards_enabled | bool
+  notify: Restart Grafana
+
+- name: Remove LLM dashboards when LLM observability is off
+  ansible.builtin.file:
+    path: "{{ etc_dir }}/grafana/provisioning/dashboards/{{ item }}.json"
+    state: absent
+  loop: "{{ observability_server_llm_dashboards }}"
+  when: not (grafana_llm_dashboards_enabled | bool)
+  notify: Restart Grafana
+
+- name: Check for previously provisioned LLM alert rules
+  ansible.builtin.stat:
+    path: "{{ etc_dir }}/grafana/provisioning/alerting/llm_alerts.yml"
+  register: observability_server_llm_alerts_file
+
+# When alerts are turned off after having been on, the file is rewritten to
+# list the rule uids under deleteRules: removing a provisioning file does not
+# delete the rules Grafana already created. Servers that never enabled LLM
+# observability get no file and no Grafana restart.
+- name: Provision LLM alert rules
+  ansible.builtin.template:
+    src: llm_alerts.yml.j2
+    dest: "{{ etc_dir }}/grafana/provisioning/alerting/llm_alerts.yml"
+    mode: '0644'
+    # Grafana does not start at all if an alerting file fails to parse.
+    validate: "{{ ansible_facts['python']['executable'] }} -c 'import json, sys; d = json.load(open(sys.argv[1])); assert d[\"apiVersion\"] == 1 and (d.get(\"groups\") or d.get(\"deleteRules\"))' %s"
+  when: grafana_llm_alerts_enabled | bool or observability_server_llm_alerts_file.stat.exists
+  notify: Restart Grafana
+
 - name: Generate Grafana LaunchAgent plist
   ansible.builtin.template:
     src: "{{ role_path }}/../observability_common/templates/launchd_agent.plist.j2"

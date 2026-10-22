@@ -32,3 +32,4 @@
       - "{{ etc_dir }}/grafana/provisioning"
       - "{{ etc_dir }}/grafana/provisioning/datasources"
       - "{{ etc_dir }}/grafana/provisioning/dashboards"
+      - "{{ etc_dir }}/grafana/provisioning/alerting"

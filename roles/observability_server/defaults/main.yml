@@ -70,6 +70,37 @@ grafana_time_interval: "15s"
 grafana_fleet_dashboard_uid: mac-mini-fleet
 grafana_detail_dashboard_uid: mac-mini-detail
 
+# LLM (MLX-LM) dashboards and alert rules, fed by roles/observability_llm on
+# the workers. Provisioned when any monitored node has llm_observability_enabled
+# true; set explicitly to override. Turning them off removes the three
+# dashboards and deletes the rules (Grafana keeps provisioned rules otherwise).
+grafana_llm_dashboards_enabled: "{{ groups.get('monitored_nodes', []) | map('extract', hostvars) | map(attribute='llm_observability_enabled', default=false) | map('bool') | select | list | length > 0 }}"
+grafana_llm_alerts_enabled: "{{ grafana_llm_dashboards_enabled }}"
+grafana_llm_overview_dashboard_uid: llm-cluster-overview
+grafana_llm_node_dashboard_uid: llm-node-detail
+grafana_llm_performance_dashboard_uid: llm-performance-quality
+grafana_llm_alert_folder: LLM Observability
+observability_server_llm_dashboards:
+  - llm_cluster_overview
+  - llm_node_detail
+  - llm_performance_quality
+
+# Alert thresholds (templates/llm_alerts.yml.j2). Windows are fixed in the
+# rules: 10 minutes for rates and quantiles, 15 minutes for restarts.
+llm_alert_ttft_p95_seconds: 5
+llm_alert_generation_p95_seconds: 120
+llm_alert_error_rate_percent: 5
+# Error-rate alert needs at least this many requests in the window.
+llm_alert_min_requests: 5
+# Only for nodes with llm_activity_expected: true.
+llm_alert_inactivity_minutes: 60
+# 1 = warning, 2 = critical (kern.memorystatus_vm_pressure_level).
+llm_alert_memory_pressure_level: 2
+llm_alert_restarts_per_15m: 2
+llm_alert_stale_minutes: 10
+# 2 = serious, 3 = critical (NSProcessInfo.thermalState).
+llm_alert_thermal_state: 2
+
 # Grafana takes noticeably longer than VictoriaMetrics on first boot (sqlite
 # init plus provisioning), so it gets a longer readiness budget.
 victoriametrics_ready_retries: 10

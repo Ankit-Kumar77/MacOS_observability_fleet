@@ -1,0 +1,35 @@
+{#- Managed by Ansible (roles/observability_llm). Read by files/mlx_telemetry.py;
+    every key is validated by `mlx-telemetry --check-config` before it is
+    installed. No secrets: the proxy forwards client Authorization headers but
+    never stores them. -#}
+{{ {
+  "upstream_host": mlx_server_host,
+  "upstream_port": mlx_server_port | int,
+  "proxy_enabled": llm_metrics_enabled | bool,
+  "proxy_host": mlx_telemetry_host,
+  "proxy_port": mlx_telemetry_port | int,
+  "proxy_stream_usage": llm_proxy_stream_usage | bool,
+  "proxy_connect_timeout_seconds": llm_proxy_connect_timeout | float,
+  "proxy_read_timeout_seconds": llm_proxy_read_timeout | float,
+  "proxy_max_request_bytes": llm_proxy_max_request_bytes | int,
+  "otlp_endpoint": llm_otel_endpoint,
+  "export_interval_seconds": llm_export_interval | float,
+  "health_check_interval_seconds": llm_health_check_interval | float,
+  "models_check_interval_seconds": llm_models_check_interval | float,
+  "inference_probe_enabled": llm_inference_probe_enabled | bool,
+  "inference_probe_interval_seconds": llm_inference_probe_interval | float,
+  "hardware_metrics_enabled": llm_hardware_metrics_enabled | bool,
+  "hardware_interval_seconds": llm_hardware_interval | float,
+  "quality_metrics_enabled": llm_quality_metrics_enabled | bool,
+  "quality_repetition_threshold": llm_quality_repetition_threshold | float,
+  "quality_hedging_threshold": llm_quality_hedging_threshold | float,
+  "quality_risk_weights": llm_quality_risk_weights,
+  "model_name": llm_model_name,
+  "model_path": mlx_model_path,
+  "model_max_context_tokens": llm_model_max_context_tokens | int,
+  "model_label_max_values": llm_model_label_max_values | int,
+  "hf_cache_dir": llm_hf_cache_dir,
+  "mlx_launchagent_label": mlx_launchagent_label,
+  "mlx_process_pattern": mlx_process_pattern,
+  "activity_expected": llm_activity_expected | bool
+} | to_nice_json(sort_keys=true) }}

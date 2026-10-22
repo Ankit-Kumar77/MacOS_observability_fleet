@@ -1,0 +1,98 @@
+{#- Managed by Ansible. LLM Performance, KV Cache and Quality: inference
+    behaviour in depth. Deterministic runtime metrics (performance, context)
+    are kept apart from the optional heuristic quality signals. Metric
+    definitions: docs/LLM_OBSERVABILITY.md. -#}
+{% import 'llm_dashboard_macros.j2' as m %}
+{% set H = 'host_name=~"$host"' %}
+{% set F = 'host_name=~"$host", model=~"$model"' %}
+{% set proxy0 = ' or on() (0 * sum(mlx_telemetry_info{' ~ H ~ ', proxy="enabled"}))' %}
+{% set quality0 = ' or on() (0 * sum(mlx_telemetry_info{' ~ H ~ ', quality="enabled"}))' %}
+{% set ri = '[$__rate_interval]' %}
+{%- macro hq(quantile, metric, window='[$__rate_interval]') -%}
+histogram_quantile({{ quantile }}, sum by (le) (rate({{ metric }}_bucket{ {{- F -}} }{{ window }})))
+{%- endmacro %}
+{
+  "uid": "{{ grafana_llm_performance_dashboard_uid }}",
+  "title": "LLM Performance, KV Cache and Quality",
+  "description": "Inference performance, context and prompt-cache use, and optional heuristic quality signals for MLX-LM.",
+  "tags": ["llm", "mlx", "otel"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "links": [
+    {"type": "link", "title": "LLM Cluster Overview", "url": "/d/{{ grafana_llm_overview_dashboard_uid }}", "icon": "dashboard", "includeVars": true, "keepTime": true, "targetBlank": false, "asDropdown": false, "tags": []},
+    {"type": "link", "title": "LLM Node Detail", "url": "/d/{{ grafana_llm_node_dashboard_uid }}", "icon": "dashboard", "includeVars": false, "keepTime": true, "targetBlank": false, "asDropdown": false, "tags": []}
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "host", "label": "Host", "type": "query",
+        "datasource": {{ m.ds | tojson }},
+        "definition": "label_values(mlx_telemetry_info, host_name)",
+        "query": {"qryType": 1, "query": "label_values(mlx_telemetry_info, host_name)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "refresh": 2, "regex": "", "sort": 1, "multi": true, "includeAll": true, "allValue": null,
+        "current": {"selected": true, "text": ["All"], "value": ["$__all"]}, "options": [], "hide": 0
+      },
+      {
+        "name": "model", "label": "Model", "type": "query",
+        "datasource": {{ m.ds | tojson }},
+        "definition": "label_values(mlx_model_info{host_name=~\"$host\"}, model)",
+        "query": {"qryType": 1, "query": "label_values(mlx_model_info{host_name=~\"$host\"}, model)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "refresh": 2, "regex": "", "sort": 1, "multi": true, "includeAll": true, "allValue": ".*",
+        "current": {"selected": true, "text": ["All"], "value": ["$__all"]}, "options": [], "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {{ m.row(1, "Performance", 0) }},
+    {{ m.ts(2, "Requests per minute", [{"expr": 'sum(rate(mlx_requests_total{' ~ F ~ '}' ~ ri ~ ')) * 60', "legend": "all"}, {"expr": 'sum(rate(mlx_requests_total{' ~ F ~ ', stream="true"}' ~ ri ~ ')) * 60', "legend": "streaming"}], 0, 1, w=8, unit="reqpm", min=0,
+        desc="Requests through the telemetry proxy; the streaming series is the subset with stream=true.", no_value="No proxy telemetry") }},
+    {{ m.ts(3, "Prompt tokens per minute", [{"expr": 'sum(rate(mlx_tokens_prompt_total{' ~ F ~ '}' ~ ri ~ ')) * 60', "legend": "prompt"}, {"expr": 'sum(rate(mlx_tokens_prompt_cached_total{' ~ F ~ '}' ~ ri ~ ')) * 60', "legend": "of which from prompt cache"}], 8, 1, w=8, unit="short", min=0,
+        desc="From MLX-LM usage blocks.", no_value="No proxy telemetry") }},
+    {{ m.ts(4, "Completion tokens per minute", [{"expr": 'sum(rate(mlx_tokens_completion_total{' ~ F ~ '}' ~ ri ~ ')) * 60', "legend": "completion"}], 16, 1, w=8, unit="short", min=0,
+        desc="From MLX-LM usage blocks.", no_value="No proxy telemetry") }},
+    {{ m.ts(5, "Completion tokens/s per request", [{"expr": hq(0.5, 'mlx_completion_tokens_per_second'), "legend": "p50"}, {"expr": hq(0.95, 'mlx_completion_tokens_per_second'), "legend": "p95"}], 0, 9, w=8, unit="short", min=0,
+        desc="(completion_tokens - 1) / generation duration, streaming requests with usage. Quantiles from histogram buckets.", no_value="No streaming requests") }},
+    {{ m.ts(6, "Time to first token", [{"expr": hq(0.5, 'mlx_time_to_first_token_seconds'), "legend": "p50"}, {"expr": hq(0.95, 'mlx_time_to_first_token_seconds'), "legend": "p95"}], 8, 9, w=8, unit="s", min=0,
+        desc="Streaming only: request start to the first SSE event with content, reasoning or a tool call.", no_value="No streaming requests") }},
+    {{ m.ts(7, "Generation duration", [{"expr": hq(0.5, 'mlx_generation_duration_seconds'), "legend": "p50"}, {"expr": hq(0.95, 'mlx_generation_duration_seconds'), "legend": "p95"}], 16, 9, w=8, unit="s", min=0,
+        desc="Streaming only: first generated content to end of stream.", no_value="No streaming requests") }},
+    {{ m.ts(8, "End-to-end request duration", [{"expr": hq(0.5, 'mlx_request_duration_seconds'), "legend": "p50"}, {"expr": hq(0.95, 'mlx_request_duration_seconds'), "legend": "p95"}, {"expr": hq(0.99, 'mlx_request_duration_seconds'), "legend": "p99"}], 0, 17, w=8, unit="s", min=0,
+        desc="Proxy receives the request to last byte relayed; the only latency measured for non-streaming requests.", no_value="No proxy telemetry") }},
+    {{ m.ts(9, "Request error rate", [{"expr": '100 * sum(rate(mlx_requests_total{' ~ F ~ ', outcome!="success"}' ~ ri ~ ')) / (sum(rate(mlx_requests_total{' ~ F ~ '}' ~ ri ~ ')) > 0)', "legend": "error %"}], 8, 17, w=8, unit="percent", min=0,
+        desc="Share of requests with an outcome other than success.", no_value="No proxy telemetry") }},
+    {{ m.ts(10, "Active requests", [{"expr": 'sum by (host_name) (mlx_requests_active{' ~ H ~ '})', "legend": m.lg('host_name')}], 16, 17, w=8, unit="short", decimals=0, min=0,
+        desc="Requests in flight through the proxy.", no_value="No proxy telemetry") }},
+
+    {{ m.row(11, "Context and KV cache", 25) }},
+    {{ m.ts(12, "Context length used per request", [{"expr": hq(0.5, 'mlx_request_context_tokens'), "legend": "p50"}, {"expr": hq(0.95, 'mlx_request_context_tokens'), "legend": "p95"}, {"expr": 'max(mlx_model_context_length_max{' ~ H ~ ', model=~"$model"})', "legend": "model max"}], 0, 26, w=8, unit="short", min=0,
+        desc="Prompt + completion tokens per request (from usage), against the model's maximum context when known.", no_value="No usage reported") }},
+    {{ m.ts(13, "Context utilisation", [{"expr": '100 * ' ~ hq(0.5, 'mlx_request_context_utilization'), "legend": "p50"}, {"expr": '100 * ' ~ hq(0.95, 'mlx_request_context_utilization'), "legend": "p95"}], 8, 26, w=8, unit="percent", min=0,
+        desc="(prompt + completion) / maximum context, per request. Only recorded when the maximum context is known (config.json or llm_model_max_context_tokens).", no_value="Max context unknown") }},
+    {{ m.stat(14, "Maximum context length", 'max(mlx_model_context_length_max{' ~ H ~ ', model=~"$model"})', 16, 26, w=4, h=4, decimals=0,
+        desc="max_position_embeddings from the model's config.json, or llm_model_max_context_tokens.", no_value="Unknown") }},
+    {{ m.stat(15, "Prompt cache reuse (1h)", '100 * sum(increase(mlx_tokens_prompt_cached_total{' ~ F ~ '}[1h])) / (sum(increase(mlx_tokens_prompt_total{' ~ F ~ '}[1h])) > 0)', 20, 26, w=4, h=4, unit="percent", decimals=1,
+        desc="Share of prompt tokens served from MLX-LM's prompt cache (usage.prompt_tokens_details.cached_tokens). Measured by MLX-LM; it is cache reuse, not KV-cache size.", no_value="No usage reported") }},
+    {{ m.text(16, "KV-cache size, utilisation, sequences, evictions", "**Not instrumented.** mlx_lm.server 0.32.2 reports no KV-cache size, capacity, cached-sequence count or eviction events through its HTTP API, and this deployment does not modify MLX-LM. A utilisation figure would need both the cache's current size and its capacity, so none is estimated (in particular not from host memory). The prompt-cache reuse figure above is the cache signal MLX-LM does report. Extension point: an `mlx.kv_cache.*` gauge family in roles/observability_llm/files/mlx_telemetry.py, once MLX-LM exposes it.", 16, 30, w=8, h=4) }},
+
+    {{ m.row(17, "Quality and hallucination-risk heuristics", 34) }},
+    {{ m.text(18, "How to read this section", "Optional (`llm_quality_metrics_enabled`, off by default). Each successful response of at least 20 words is scored **in memory** by three text heuristics and then discarded; nothing is stored or logged. **These are heuristics, not a hallucination or fact-checking detector**:\n\n- *repetition* = share of repeated word trigrams (flag at >= `llm_quality_repetition_threshold`, default 0.3)\n- *hedging* = hedge phrases per 100 words (flag at >= `llm_quality_hedging_threshold`, default 2)\n- *refusal* = a refusal phrase is present\n- *heuristic risk score* = 0.5 x min(1, repetition/threshold) + 0.3 x min(1, hedging/threshold) + 0.2 x refusal (weights configurable)\n\nGroundedness is **not evaluated**: no reference source or evaluator is configured.", 0, 35, w=24, h=6) }},
+    {{ m.stat(19, "Responses evaluated (1h)", 'sum(increase(mlx_quality_evaluations_total{' ~ F ~ '}[1h]))' ~ quality0, 0, 41, w=4, decimals=0,
+        desc="Responses the heuristics scored in the last hour.", no_value="Heuristics disabled") }},
+    {{ m.stat(20, "Flagged responses (1h)", 'sum(increase(mlx_quality_flagged_responses_total{' ~ F ~ '}[1h]))' ~ quality0, 4, 41, w=4, decimals=0, spec=[["green", None], ["orange", 1]],
+        desc="Responses with at least one heuristic flag in the last hour.", no_value="Heuristics disabled") }},
+    {{ m.stat(21, "Heuristic risk p95 (1h)", hq(0.95, 'mlx_quality_heuristic_risk_score', '[1h]'), 8, 41, w=4, decimals=2, spec=[["green", None], ["orange", 0.5], ["red", 0.8]],
+        desc="95th percentile heuristic risk score (0-1) from histogram buckets. Not a probability of hallucination.", no_value="No evaluations") }},
+    {{ m.stat(22, "Latest heuristic risk", 'max(mlx_quality_last_heuristic_risk_score{' ~ F ~ '})', 12, 41, w=4, decimals=2, spec=[["green", None], ["orange", 0.5], ["red", 0.8]],
+        desc="Score of the most recently evaluated response (highest across selected nodes).", no_value="No evaluations") }},
+    {{ m.stat(23, "Repetition p95 (1h)", hq(0.95, 'mlx_quality_repetition', '[1h]'), 16, 41, w=4, unit="percentunit", decimals=1,
+        desc="95th percentile share of repeated word trigrams.", no_value="No evaluations") }},
+    {{ m.text(24, "Groundedness", "**Not evaluated.** Grounded vs ungrounded results need a defined reference source or evaluator, which this deployment does not have. No response is labelled correct or incorrect.", 20, 41, w=4, h=4) }},
+    {{ m.ts(25, "Heuristic flags per minute", [{"expr": 'sum by (flag) (rate(mlx_quality_flags_total{' ~ F ~ '}' ~ ri ~ ')) * 60', "legend": m.lg('flag')}], 0, 45, w=12, unit="short", min=0, stack=true,
+        desc="Flags raised per minute by heuristic (repetition, hedging, refusal).", no_value="Heuristics disabled or no flags") }},
+    {{ m.ts(26, "Heuristic risk score", [{"expr": hq(0.5, 'mlx_quality_heuristic_risk_score'), "legend": "p50"}, {"expr": hq(0.95, 'mlx_quality_heuristic_risk_score'), "legend": "p95"}], 12, 45, w=12, unit="short", min=0, max=1,
+        desc="Quantiles of the weighted heuristic score from histogram buckets.", no_value="No evaluations") }}
+  ]
+}

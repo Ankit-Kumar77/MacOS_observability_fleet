@@ -1,0 +1,25 @@
+---
+# Enabled per host with llm_observability_enabled. The agent role must run
+# first in the same play: it renders the collector's loopback OTLP receiver
+# that this role's telemetry agent exports to.
+- name: Import prerequisites tasks
+  ansible.builtin.import_tasks: prerequisites.yml
+  when: llm_observability_enabled | bool
+
+- name: Import MLX telemetry install tasks
+  ansible.builtin.import_tasks: install.yml
+  when: llm_observability_enabled | bool
+
+# Verify what this run produced, not the previous definition.
+- name: Apply pending MLX telemetry restarts before verification
+  ansible.builtin.meta: flush_handlers
+
+- name: Import verify tasks
+  ansible.builtin.import_tasks: verify.yml
+  when: llm_observability_enabled | bool
+
+# Turning the feature off removes only this role's LaunchAgent; host metrics,
+# the collector and the MLX-LM server are untouched.
+- name: Import disable tasks
+  ansible.builtin.import_tasks: disable.yml
+  when: not (llm_observability_enabled | bool)

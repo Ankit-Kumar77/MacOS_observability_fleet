@@ -54,6 +54,16 @@ receivers:
     poll_interval: 5s
     exclude_older_than: {{ (otel_ssh_check_interval | int) * 3 }}s
 {% endif %}
+{% if llm_observability_enabled | default(false) | bool %}
+
+  # MLX-LM telemetry from the {{ launchd_label_prefix }}.mlxtelemetry LaunchAgent
+  # (roles/observability_llm). Loopback only: nothing off this Mac can write
+  # metrics into the pipeline through it.
+  otlp/llm:
+    protocols:
+      http:
+        endpoint: "127.0.0.1:{{ llm_otlp_receiver_port }}"
+{% endif %}
 
 processors:
   batch:
@@ -90,6 +100,6 @@ service:
                 without_units: true
   pipelines:
     metrics:
-      receivers: [hostmetrics{{ ', tcp_check/monitoring_server' if otel_latency_check_enabled | bool else '' }}{{ ', otlp_json_file/ssh_state' if otel_ssh_monitoring_enabled | bool else '' }}]
+      receivers: [hostmetrics{{ ', tcp_check/monitoring_server' if otel_latency_check_enabled | bool else '' }}{{ ', otlp_json_file/ssh_state' if otel_ssh_monitoring_enabled | bool else '' }}{{ ', otlp/llm' if llm_observability_enabled | default(false) | bool else '' }}]
       processors: [resourcedetection, batch]
       exporters: [otlphttp]

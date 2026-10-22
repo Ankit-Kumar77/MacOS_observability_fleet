@@ -1,0 +1,112 @@
+---
+# MLX-LM (LLM) observability for monitored Macs that run mlx_lm.server.
+#
+# Off unless llm_observability_enabled is true for the host (set it in
+# inventory host_vars or a child group of monitored_nodes; the fleet-wide
+# default false lives in group_vars/all.yml). When it is false on a host that
+# had it before, this role unloads and removes only its own LaunchAgent.
+#
+# This role never starts, stops or reconfigures the MLX-LM server itself or its
+# LaunchAgent; mlx_launchagent_label is only read (launchctl print).
+
+# Filesystem and launchd layout: the same values as the other roles, duplicated
+# here like base_dir always is so each role stays self-contained.
+base_dir: "{{ ansible_facts['user_dir'] }}/tools/observability"
+bin_dir: "{{ base_dir }}/bin"
+etc_dir: "{{ base_dir }}/etc"
+var_dir: "{{ base_dir }}/var"
+log_dir: "{{ var_dir }}/log"
+download_dir: "{{ var_dir }}/downloads"
+launch_agents_dir: "{{ ansible_facts['user_dir'] }}/Library/LaunchAgents"
+launchd_domain_type: user
+launchd_domain: "{{ launchd_domain_type }}/{{ ansible_facts['user_uid'] }}"
+launchd_label_prefix: com.observability.user
+mlx_telemetry_launchd_label: "{{ launchd_label_prefix }}.mlxtelemetry"
+mlx_telemetry_launchd_plist: "{{ launch_agents_dir }}/{{ mlx_telemetry_launchd_label }}.plist"
+
+# The existing MLX-LM server (mlx_lm.server --host/--port). Loopback by default.
+mlx_server_host: 127.0.0.1
+mlx_server_port: 8080
+# Label of the LaunchAgent that already runs mlx_lm.server, e.g.
+# com.example.mlx-lm. Optional: when set, process state and launchd restart
+# counts come from `launchctl print gui|user/<uid>/<label>` (read only);
+# otherwise the process is found by mlx_process_pattern.
+mlx_launchagent_label: ""
+mlx_process_pattern: 'mlx_lm(\.server\b|\s+server\b|/server\.py\b)'
+# Local model directory, used only to read config.json for the maximum context
+# length. Leave empty for Hugging Face repositories (the HF cache is searched)
+# or when llm_model_max_context_tokens is set.
+mlx_model_path: ""
+# Hugging Face hub cache of the user running MLX-LM; empty = $HF_HUB_CACHE,
+# $HF_HOME/hub or ~/.cache/huggingface/hub.
+llm_hf_cache_dir: ""
+
+# Request telemetry: an OpenAI-compatible proxy in front of MLX-LM. Clients
+# are measured only if they send requests to
+# http://<mlx_telemetry_host>:<mlx_telemetry_port> instead of MLX-LM directly;
+# nothing is redirected automatically.
+llm_metrics_enabled: true
+mlx_telemetry_host: 127.0.0.1
+mlx_telemetry_port: 18080
+# Streaming requests carry token usage only if the client asks for it. When
+# true, the proxy adds stream_options.include_usage to streaming requests that
+# do not set stream_options, and removes the extra usage event before it
+# reaches the client, so the client sees exactly what MLX-LM would have sent.
+llm_proxy_stream_usage: true
+llm_proxy_connect_timeout: 5
+llm_proxy_read_timeout: 600
+llm_proxy_max_request_bytes: 33554432
+
+# Health checks: process, /health every interval, /v1/models less often.
+llm_health_check_interval: 15
+llm_models_check_interval: 60
+# One-token completion sent directly to MLX-LM (not through the proxy). Off by
+# default: it costs a real, if tiny, inference.
+llm_inference_probe_enabled: false
+llm_inference_probe_interval: 300
+
+# Unprivileged Apple Silicon readings (GPU utilisation and memory, memory
+# pressure, thermal state). Power and GPU frequency need root and are reported
+# as unavailable.
+llm_hardware_metrics_enabled: true
+llm_hardware_interval: 15
+
+# Optional text heuristics (repetition, refusal, hedging). Responses are
+# scored in memory and discarded; nothing is stored or logged.
+llm_quality_metrics_enabled: false
+llm_quality_repetition_threshold: 0.3
+llm_quality_hedging_threshold: 2.0
+llm_quality_risk_weights: {repetition: 0.5, hedging: 0.3, refusal: 0.2}
+
+# Model label. Empty = detected from the server's --model argument (a path is
+# reduced to its last component), else the single model /v1/models lists.
+llm_model_name: ""
+# 0 = read max_position_embeddings from the model's config.json when found.
+llm_model_max_context_tokens: 0
+llm_model_label_max_values: 10
+
+# 1 = alert when this node serves no requests for the inactivity window
+# (server role: llm_alert_inactivity_minutes).
+llm_activity_expected: false
+
+# Export to the local collector's loopback OTLP/HTTP receiver
+# (llm_otlp_receiver_port, group_vars/all.yml), which forwards to
+# VictoriaMetrics with the host's other metrics.
+llm_otel_endpoint: "http://127.0.0.1:{{ llm_otlp_receiver_port | default(14318) }}/v1/metrics"
+llm_export_interval: 15
+
+# Interpreter for the agent: standard library only, Python 3.9+. The default
+# is the interpreter Ansible itself uses on the host, so it is known to work.
+llm_telemetry_python: "{{ ansible_facts['python']['executable'] }}"
+
+# Deployment checks.
+# Fail the play when MLX-LM /health is unreachable at deploy time. Set false to
+# install telemetry on a node whose server is temporarily down.
+llm_require_mlx_reachable: true
+
+mlx_telemetry_program: "{{ bin_dir }}/mlx-telemetry"
+mlx_telemetry_config: "{{ etc_dir }}/mlx-telemetry.json"
+mlx_telemetry_program_arguments:
+  - "{{ llm_telemetry_python }}"
+  - "{{ mlx_telemetry_program }}"
+  - "--config={{ mlx_telemetry_config }}"

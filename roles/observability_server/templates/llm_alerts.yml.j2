@@ -1,0 +1,83 @@
+{#- Managed by Ansible. Grafana file-provisioned alert rules for MLX-LM
+    (roles/observability_llm). Thresholds are role defaults (llm_alert_*).
+
+    Rendered as JSON (valid YAML) from a data structure, and checked with
+    json.load before it is installed: Grafana refuses to start at all when an
+    alerting provisioning file does not parse.
+
+    Every rule uses noDataState OK: an absent optional metric (proxy disabled,
+    hardware reading unavailable, no streaming traffic) is not a failure.
+    Missing telemetry has its own rule. Notifications follow Grafana's default
+    notification policy; no contact point or secret is provisioned here (see
+    docs/LLM_OBSERVABILITY.md, "Alerts").
+
+    With grafana_llm_alerts_enabled false the file lists the rule uids under
+    deleteRules, because removing a provisioning file does not delete the
+    rules Grafana already created from it. -#}
+{%- set specs = [
+  {"uid": "llm-mlx-server-down", "title": "MLX-LM server unavailable",
+   "expr": "max by (host_name) (mlx_server_up)", "op": "lt", "threshold": 1, "for": "2m", "severity": "critical", "window": 300,
+   "summary": "MLX-LM /health is failing on {{ $labels.host_name }}",
+   "description": "The telemetry agent is running but MLX-LM did not answer /health with 200. Check the MLX-LM LaunchAgent and its log on that Mac."},
+  {"uid": "llm-mlx-health-check-failing", "title": "MLX-LM model API or inference probe failing",
+   "expr": "sum by (host_name, check) (increase(mlx_health_check_failures_total{check=~\"models|inference\"}[10m]))", "op": "gt", "threshold": 0, "for": "5m", "severity": "warning", "window": 600,
+   "summary": "MLX-LM {{ $labels.check }} check failing on {{ $labels.host_name }}",
+   "description": "/v1/models (check=models) or the optional one-token probe (check=inference) failed in the last 10 minutes while /health may still pass."},
+  {"uid": "llm-mlx-error-rate", "title": "MLX-LM request error rate high",
+   "expr": "(100 * sum by (host_name) (increase(mlx_requests_total{outcome=~\"server_error|upstream_error|timeout\"}[10m])) / sum by (host_name) (increase(mlx_requests_total[10m]))) and on (host_name) (sum by (host_name) (increase(mlx_requests_total[10m])) >= " ~ llm_alert_min_requests ~ ")",
+   "op": "gt", "threshold": llm_alert_error_rate_percent, "for": "5m", "severity": "warning", "window": 600,
+   "summary": "MLX-LM error rate above " ~ llm_alert_error_rate_percent ~ "% on {{ $labels.host_name }}",
+   "description": "Share of proxied requests that ended in a 5xx, an unreachable MLX-LM or a timeout over 10 minutes (client 4xx and client disconnects excluded; needs at least " ~ llm_alert_min_requests ~ " requests)."},
+  {"uid": "llm-mlx-ttft-p95", "title": "MLX-LM time to first token p95 high",
+   "expr": "histogram_quantile(0.95, sum by (host_name, le) (rate(mlx_time_to_first_token_seconds_bucket[10m])))", "op": "gt", "threshold": llm_alert_ttft_p95_seconds, "for": "10m", "severity": "warning", "window": 600,
+   "summary": "TTFT p95 above " ~ llm_alert_ttft_p95_seconds ~ "s on {{ $labels.host_name }}",
+   "description": "95th percentile time to first generated content of streaming requests over 10 minutes."},
+  {"uid": "llm-mlx-generation-p95", "title": "MLX-LM generation latency degraded",
+   "expr": "histogram_quantile(0.95, sum by (host_name, le) (rate(mlx_generation_duration_seconds_bucket[10m])))", "op": "gt", "threshold": llm_alert_generation_p95_seconds, "for": "10m", "severity": "warning", "window": 600,
+   "summary": "Generation duration p95 above " ~ llm_alert_generation_p95_seconds ~ "s on {{ $labels.host_name }}",
+   "description": "95th percentile time from first generated content to end of stream over 10 minutes."},
+  {"uid": "llm-mlx-no-activity", "title": "No MLX-LM inference activity where expected",
+   "expr": "max by (host_name) (mlx_activity_expected == 1) unless on (host_name) (sum by (host_name) (increase(mlx_requests_total{outcome=\"success\"}[" ~ llm_alert_inactivity_minutes ~ "m])) > 0)",
+   "op": "gt", "threshold": 0, "for": "5m", "severity": "warning", "window": (llm_alert_inactivity_minutes | int) * 60,
+   "summary": "No successful inference on {{ $labels.host_name }} for " ~ llm_alert_inactivity_minutes ~ " minutes",
+   "description": "llm_activity_expected is true for this node, but the telemetry proxy recorded no successful request in the window. Clients may be bypassing the proxy or failing upstream."},
+  {"uid": "llm-memory-pressure", "title": "High memory pressure on an LLM node",
+   "expr": "max by (host_name) (macos_memory_pressure_level)", "op": "gt", "threshold": (llm_alert_memory_pressure_level | int) - 1, "for": "5m", "severity": "warning", "window": 300,
+   "summary": "Memory pressure level {{ $values.A }} on {{ $labels.host_name }}",
+   "description": "Kernel memory pressure (0 normal, 1 warning, 2 critical) at or above " ~ llm_alert_memory_pressure_level ~ " for 5 minutes."},
+  {"uid": "llm-mlx-restarting", "title": "MLX-LM process restarting",
+   "expr": "sum by (host_name) (increase(mlx_process_restarts_total[15m]))", "op": "gt", "threshold": (llm_alert_restarts_per_15m | int) - 1, "for": "0s", "severity": "warning", "window": 900,
+   "summary": "MLX-LM restarted {{ $values.A }} times in 15 minutes on {{ $labels.host_name }}",
+   "description": "Observed changes of the MLX-LM server pid. Check its LaunchAgent log for crashes or memory exhaustion."},
+  {"uid": "llm-telemetry-stale", "title": "LLM telemetry missing or stale",
+   "expr": "max by (host_name) (max_over_time(mlx_telemetry_up[1h])) unless on (host_name) max by (host_name) (mlx_telemetry_up)", "op": "gt", "threshold": 0, "for": llm_alert_stale_minutes ~ "m", "severity": "warning", "window": 3600,
+   "summary": "No LLM telemetry from {{ $labels.host_name }}",
+   "description": "The node reported LLM telemetry in the last hour but not now: the telemetry agent stopped, the Mac rebooted (LaunchAgents do not start at boot), or export is failing."},
+  {"uid": "llm-thermal-pressure", "title": "Thermal pressure on an LLM node",
+   "expr": "max by (host_name) (macos_thermal_state)", "op": "gt", "threshold": (llm_alert_thermal_state | int) - 1, "for": "5m", "severity": "warning", "window": 300,
+   "summary": "Thermal state {{ $values.A }} on {{ $labels.host_name }}",
+   "description": "NSProcessInfo thermal state (0 nominal, 1 fair, 2 serious, 3 critical) at or above " ~ llm_alert_thermal_state ~ ". Only fires where the reading is collected."}
+] -%}
+{%- set rules = [] -%}
+{%- for s in specs -%}
+{%- set _ = rules.append({
+  "uid": s.uid, "title": s.title, "condition": "B",
+  "data": [
+    {"refId": "A", "relativeTimeRange": {"from": s.window | int, "to": 0}, "datasourceUid": "victoriametrics",
+     "model": {"refId": "A", "expr": s.expr, "instant": true, "intervalMs": 60000, "maxDataPoints": 43200}},
+    {"refId": "B", "relativeTimeRange": {"from": 0, "to": 0}, "datasourceUid": "__expr__",
+     "model": {"refId": "B", "type": "threshold", "expression": "A",
+               "conditions": [{"evaluator": {"type": s.op, "params": [s.threshold | float]}}]}}
+  ],
+  "noDataState": "OK", "execErrState": "Error", "for": s["for"], "isPaused": false,
+  "labels": {"severity": s.severity, "component": "mlx-lm"},
+  "annotations": {"summary": s.summary, "description": s.description, "dashboard": "/d/" ~ grafana_llm_overview_dashboard_uid}
+}) -%}
+{%- endfor -%}
+{%- if grafana_llm_alerts_enabled | bool -%}
+{{ {"apiVersion": 1, "groups": [{"orgId": 1, "name": "MLX-LM", "folder": grafana_llm_alert_folder, "interval": "1m", "rules": rules}]} | to_nice_json(sort_keys=false) }}
+{%- else -%}
+{%- set deletes = [] -%}
+{%- for s in specs -%}{%- set _ = deletes.append({"orgId": 1, "uid": s.uid}) -%}{%- endfor -%}
+{{ {"apiVersion": 1, "deleteRules": deletes} | to_nice_json(sort_keys=false) }}
+{%- endif %}

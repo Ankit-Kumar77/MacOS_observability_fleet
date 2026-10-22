@@ -1,0 +1,41 @@
+---
+# Standard library only, so nothing is downloaded. The syntax check runs before
+# the file replaces a working copy.
+- name: Install the MLX telemetry agent
+  ansible.builtin.copy:
+    src: mlx_telemetry.py
+    dest: "{{ mlx_telemetry_program }}"
+    mode: '0755'
+    validate: "{{ llm_telemetry_python }} -c 'import ast, sys; ast.parse(open(sys.argv[1], encoding=\"utf-8\").read(), sys.argv[1])' %s"
+  notify: Restart MLX telemetry agent
+
+# Validated by the agent itself (key names, types, ports, bucket lists) before
+# it replaces the current configuration. 0600 like the other rendered configs.
+- name: Generate the MLX telemetry configuration
+  ansible.builtin.template:
+    src: mlx_telemetry.json.j2
+    dest: "{{ mlx_telemetry_config }}"
+    mode: '0600'
+    validate: "{{ llm_telemetry_python }} {{ mlx_telemetry_program }} --check-config %s"
+  notify: Restart MLX telemetry agent
+
+- name: Generate the MLX telemetry LaunchAgent plist
+  ansible.builtin.template:
+    src: "{{ role_path }}/../observability_common/templates/launchd_agent.plist.j2"
+    dest: "{{ mlx_telemetry_launchd_plist }}"
+    mode: '0644'
+  vars:
+    launchd_label: "{{ mlx_telemetry_launchd_label }}"
+    launchd_program_arguments: "{{ mlx_telemetry_program_arguments }}"
+    launchd_working_directory: "{{ var_dir }}"
+    launchd_stdout_log: "{{ log_dir }}/mlxtelemetry.out.log"
+    launchd_stderr_log: "{{ log_dir }}/mlxtelemetry.err.log"
+  notify: Restart MLX telemetry agent
+
+- name: Ensure the MLX telemetry agent is loaded in the per-user launchd domain
+  ansible.builtin.include_role:
+    name: observability_common
+    tasks_from: launchd_ensure_started
+  vars:
+    launchd_service_label: "{{ mlx_telemetry_launchd_label }}"
+    launchd_service_plist: "{{ mlx_telemetry_launchd_plist }}"

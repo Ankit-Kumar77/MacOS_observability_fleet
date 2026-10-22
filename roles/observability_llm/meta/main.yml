@@ -1,0 +1,17 @@
+---
+galaxy_info:
+  role_name: observability_llm
+  author: MacOS observability fleet
+  description: Adds MLX-LM (LLM) request, health and Apple Silicon telemetry to monitored Macs, as a per-user LaunchAgent.
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: MacOSX
+      versions:
+        - all
+  galaxy_tags:
+    - monitoring
+    - opentelemetry
+    - macos
+    - llm
+dependencies: []

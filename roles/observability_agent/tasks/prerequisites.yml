@@ -30,6 +30,30 @@
       - {name: VictoriaMetrics (export target), port: "{{ victoriametrics_port }}", legacy_port: "{{ observability_legacy_victoriametrics_port }}"}
       - {name: Collector internal metrics, port: "{{ otel_internal_metrics_port }}", legacy_port: "{{ observability_legacy_otel_internal_metrics_port }}"}
 
+# The MLX telemetry receiver is added to a collector that may already be
+# running, which the preflight port check (not-yet-loaded agents only) does not
+# cover. A port held by anything but our collector would leave the restarted
+# collector failing. lsof sees this user's processes only; the end-to-end
+# verification catches the rest.
+- name: Check the MLX telemetry OTLP receiver port
+  ansible.builtin.command:
+    cmd: "lsof -nP -iTCP@127.0.0.1:{{ llm_otlp_receiver_port }} -sTCP:LISTEN -Fc"
+  register: observability_agent_llm_port
+  changed_when: false
+  failed_when: false
+  when: llm_observability_enabled | default(false) | bool
+
+- name: Assert the MLX telemetry OTLP receiver port is free or held by the collector
+  ansible.builtin.assert:
+    that:
+      - observability_agent_llm_port.stdout_lines | select('match', '^c') | reject('match', '^cotelcol') | list | length == 0
+    fail_msg: >-
+      Port {{ llm_otlp_receiver_port }} on 127.0.0.1 is held by another process
+      ({{ observability_agent_llm_port.stdout_lines | select('match', '^c') | map('regex_replace', '^c', '') | join(', ') }}),
+      so the collector could not open its MLX telemetry receiver. Pick a free
+      llm_otlp_receiver_port in group_vars/all.yml.
+  when: llm_observability_enabled | default(false) | bool
+
 - name: Create the observability directory layout
   ansible.builtin.include_role:
     name: observability_common

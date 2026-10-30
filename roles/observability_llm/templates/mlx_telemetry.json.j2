@@ -1,7 +1,8 @@
 {#- Managed by Ansible (roles/observability_llm). Read by files/mlx_telemetry.py;
     every key is validated by `mlx-telemetry --check-config` before it is
     installed. No secrets: the proxy forwards client Authorization headers but
-    never stores them. -#}
+    never stores them, and the optional server / OMLX API keys stay in their
+    own files on the Mac (only the paths are rendered here). -#}
 {{ {
   "upstream_host": mlx_server_host,
   "upstream_port": mlx_server_port | int,
@@ -31,5 +32,13 @@
   "hf_cache_dir": llm_hf_cache_dir,
   "mlx_launchagent_label": mlx_launchagent_label,
   "mlx_process_pattern": mlx_process_pattern,
+  "mlx_vlm_process_pattern": mlx_vlm_process_pattern,
+  "framework": llm_framework,
+  "upstream_api_key_file": llm_server_api_key_file,
+  "omlx_enabled": omlx_monitoring_enabled | bool,
+  "omlx_url": omlx_url,
+  "omlx_api_key_file": omlx_api_key_file,
+  "omlx_poll_interval_seconds": omlx_poll_interval | float,
+  "omlx_timeout_seconds": omlx_timeout | float,
   "activity_expected": llm_activity_expected | bool
 } | to_nice_json(sort_keys=true) }}

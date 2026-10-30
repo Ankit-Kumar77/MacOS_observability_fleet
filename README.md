@@ -215,24 +215,24 @@ Versions, checksums and tuning are role defaults under `roles/<role>/defaults/ma
 
 Do not treat this branch as production-tested until a monitoring Mac plus one worker Mac succeed over SSH and survive a reboot cycle as documented.
 
-## LLM (MLX-LM) observability (optional)
+## LLM (MLX-LM / MLX-VLM) observability (optional)
 
-Macs that serve models with `mlx_lm.server` can also report inference telemetry. A third role, `observability_llm`, runs in the agents play and does nothing unless `llm_observability_enabled: true` is set for the host. It installs a per-user LaunchAgent, `com.observability.user.mlxtelemetry`, that does three things:
+Macs that serve models with `mlx_lm.server` or `mlx_vlm.server` can also report inference telemetry; the framework is detected per Mac (`llm_framework` overrides it). A third role, `observability_llm`, runs in the agents play and does nothing unless `llm_observability_enabled: true` is set for the host. It installs a per-user LaunchAgent, `com.observability.user.mlxtelemetry`, that does three things, plus optional OMLX KV-cache readings:
 
-- **Proxy:** an OpenAI-compatible proxy in front of MLX-LM that measures requests, TTFT, generation time, tokens, errors and active requests.
-- **Health:** checks of the MLX-LM process, `/health` and `/v1/models`.
+- **Proxy:** an OpenAI-compatible proxy in front of the server that measures requests, streaming TTFT, non-streaming latency, generation time, tokens, errors and active requests, labelled by `framework` (image requests are forwarded unchanged).
+- **Health:** checks of the server process, `/health` and `/v1/models`, and framework detection.
 - **Hardware:** GPU utilisation and memory, memory pressure and thermal state, all from sources readable without root.
 
-It exports over OTLP to a new loopback receiver on the existing collector, so the metrics reach VictoriaMetrics with the host's other metrics. The monitoring Mac provisions three dashboards (LLM Cluster Overview, LLM Node Detail, and LLM Performance, KV Cache and Quality) and 10 alert rules. Requests are measured only when clients use the proxy port (`mlx_telemetry_port`, 18080) instead of MLX-LM's own port.
+It exports over OTLP to a new loopback receiver on the existing collector, so the metrics reach VictoriaMetrics with the host's other metrics. The monitoring Mac provisions three dashboards (LLM Cluster Overview, LLM Node Detail, and LLM Performance, KV Cache and Quality) and 10 alert rules. Requests are measured only when clients use the proxy port (`mlx_telemetry_port`, 18080) instead of the server's own port.
 
-KV-cache size and occupancy, GPU frequency and power are reported as unavailable, never estimated.
+On Macs that run OMLX, `omlx_monitoring_enabled` adds its KV-cache figures (hot and SSD tier used and capacity, utilisation, hit ratio, evictions). Without OMLX, KV-cache size and occupancy are reported as unavailable, as are GPU frequency and power; none of them is estimated.
 
 See [docs/LLM_OBSERVABILITY.md](docs/LLM_OBSERVABILITY.md) for setup, variables, metric definitions, limitations, verification and rollback.
 
 ## More documentation
 
 - [Confluence page: LaunchAgent deployment](docs/CONFLUENCE_LAUNCHAGENT_GUIDE.html): paste-ready HTML guide, including the Local Network Privacy issue
-- [LLM (MLX-LM) observability](docs/LLM_OBSERVABILITY.md): optional inference, health and Apple Silicon telemetry, dashboards and alerts
+- [LLM (MLX-LM / MLX-VLM) observability](docs/LLM_OBSERVABILITY.md): optional inference, health, OMLX KV-cache and Apple Silicon telemetry, dashboards and alerts
 - [LaunchAgent / no-sudo variant](docs/LAUNCHAGENT_VARIANT.md): differences, lifecycle, SSH capability matrix, side-by-side mode, operations
 - [Project internal flow](docs/PROJECT_FLOW.md)
 - [KT guide](docs/KT_GUIDE.md)

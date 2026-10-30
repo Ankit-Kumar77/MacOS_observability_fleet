@@ -51,7 +51,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 LOG = logging.getLogger("mlx-telemetry")
 
 # --------------------------------------------------------------------------
@@ -104,6 +104,7 @@ DEFAULTS = {
     "omlx_api_key_file": "",
     "omlx_poll_interval_seconds": 30,
     "omlx_timeout_seconds": 5,
+    "vlm_cache_stats_enabled": True,
     "activity_expected": False,
     "buckets": {
         "request_duration": [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300],
@@ -139,6 +140,7 @@ _TYPES = {
     "framework": str, "upstream_api_key_file": str, "omlx_enabled": bool,
     "omlx_url": str, "omlx_api_key_file": str,
     "omlx_poll_interval_seconds": (int, float), "omlx_timeout_seconds": (int, float),
+    "vlm_cache_stats_enabled": bool,
     "activity_expected": bool, "buckets": dict,
 }
 
@@ -238,7 +240,7 @@ class Counter:
 
 
 class ObservedCounter(Counter):
-    """A cumulative counter kept by another process (OMLX) and copied here.
+    """A cumulative counter kept by another process (OMLX, MLX-VLM) and copied here.
     When the value drops, that process restarted, so the series gets a new
     start time and VictoriaMetrics treats it as a counter reset."""
 
@@ -255,10 +257,12 @@ class ObservedCounter(Counter):
                 self._starts[key] = start_ns
             self._values[key] = value
 
-    def retain(self, label, values):
-        """Drop series whose `label` is not in values (e.g. unloaded models)."""
+    def retain(self, source, models):
+        """Drop this source's series whose model is not in models (unloaded
+        models; an empty set drops them all). Other sources are untouched."""
         with self._lock:
-            for key in [k for k in self._values if dict(k).get(label) not in values]:
+            for key in [k for k in self._values
+                        if dict(k).get("source") == source and dict(k).get("model") not in models]:
                 del self._values[key]
                 self._starts.pop(key, None)
 
@@ -285,10 +289,23 @@ class Gauge:
             else:
                 self._values[key] = float(value)
 
-    def replace(self, series):
-        """Replace every series at once: [(value, {labels})]. Drops ones not listed."""
+    def replace(self, series, source=None):
+        """Replace every series at once: [(value, {labels})]. Drops ones not
+        listed. With source, only that source's series are replaced, so two
+        KV-cache sources can share one gauge."""
+        new = {tuple(sorted(labels.items())): float(value) for value, labels in series}
         with self._lock:
-            self._values = {tuple(sorted(labels.items())): float(value) for value, labels in series}
+            if source is not None:
+                kept = {k: v for k, v in self._values.items() if dict(k).get("source") != source}
+                kept.update(new)
+                new = kept
+            self._values = new
+
+    def relabel(self, label, value):
+        """Set `label` to value on every series (the node's framework changed)."""
+        with self._lock:
+            self._values = {tuple(sorted(dict(k, **{label: value}).items())): v
+                            for k, v in ((dict(k), v) for k, v in self._values.items())}
 
     def points(self, start_ns, now_ns):
         with self._lock:
@@ -416,7 +433,9 @@ class Metrics:
         self.process_rss = r.gauge("mlx.process.memory.rss", "By", "Resident set size of the MLX-LM server process (excludes most Metal/GPU buffers)")
         self.process_footprint = r.gauge("mlx.process.memory.footprint", "By", "Physical footprint of the MLX-LM process incl. Metal buffers (top MEM)")
         self.process_cpu = r.gauge("mlx.process.cpu.utilization", "%", "CPU of the MLX-LM process as reported by ps (100 = one core)")
-        self.process_restarts = r.counter("mlx.process.restarts", "{restart}", "Observed changes of the MLX-LM server pid")
+        self.process_restarts = r.counter("mlx.process.restarts", "{restart}", "Observed changes of the server pid")
+        self.process_uptime = r.gauge("mlx.process.uptime", "s", "Elapsed time since the server process started (ps etime)")
+        self.framework_processes = r.gauge("mlx.framework.processes", "{process}", "Server processes found per framework (both frameworks always reported)")
         self.launchd_runs = r.gauge("mlx.process.launchd_runs", "{run}", "launchd 'runs' count for the MLX-LM LaunchAgent (mlx_launchagent_label)")
         self.model_info = r.gauge("mlx.model.info", "", "Model served, value always 1")
         self.model_max_context = r.gauge("mlx.model.context_length.max", "{token}", "Maximum context length from the model config or llm_model_max_context_tokens")
@@ -424,17 +443,20 @@ class Metrics:
         # Timings the server itself reports in its response (MLX-VLM "timings"); MLX-LM sends none.
         self.server_tps = r.histogram("mlx.server_reported.tokens_per_second", "", "Generation rate the server reports per request (timings.predicted_per_second)", b["tokens_per_second"])
         self.server_prompt_duration = r.histogram("mlx.server_reported.prompt_duration", "s", "Prompt processing time the server reports per request (timings.prompt_ms)", b["time_to_first_token"])
-        # Optional OMLX KV-cache adapter (GET <omlx_url>/admin/api/stats).
-        self.omlx_up = r.gauge("omlx.up", "", "1 if the last OMLX stats poll succeeded")
-        self.omlx_failures = r.counter("omlx.scrape.failures", "{poll}", "Failed OMLX stats polls, per reason")
-        self.omlx_available = r.gauge("omlx.kv_cache.metric.available", "", "1 if OMLX reports this KV-cache figure, 0 if it does not")
-        self.kv_used = r.gauge("omlx.kv_cache.used", "By", "KV cache held by OMLX per tier (hot = memory, ssd = disk) and model")
-        self.kv_capacity = r.gauge("omlx.kv_cache.capacity", "By", "KV cache budget per tier (process-wide, shared by all models)")
-        self.kv_utilization = r.gauge("omlx.kv_cache.utilization", "%", "KV cache used / capacity per tier, only when OMLX reports a capacity")
-        self.kv_entries = r.gauge("omlx.kv_cache.entries", "{entry}", "KV cache blocks held per tier and model (hot entries, ssd files)")
-        self.kv_lookups = ObservedCounter("omlx.kv_cache.lookups", "{lookup}", "KV cache block lookups by result (hit/miss), OMLX counters since its start")
-        self.kv_hot_hits = ObservedCounter("omlx.kv_cache.hot_hits", "{lookup}", "Lookups served from the in-memory hot tier (a subset of hits)")
-        self.kv_evictions = ObservedCounter("omlx.kv_cache.evictions", "{block}", "KV cache blocks evicted per tier")
+        # KV cache, labelled by source: "mlx-vlm" (MLX-VLM's prefix cache,
+        # GET /v1/cache/stats) or "omlx" (optional, GET <omlx_url>/admin/api/stats).
+        self.kv_up = r.gauge("mlx.kv_cache.source.up", "", "1 if the last poll of this KV-cache source succeeded")
+        self.kv_enabled = r.gauge("mlx.kv_cache.enabled", "", "1 if the source reports its KV cache as enabled")
+        self.kv_failures = r.counter("mlx.kv_cache.scrape.failures", "{poll}", "Failed KV-cache stats polls, per source and reason")
+        self.kv_available = r.gauge("mlx.kv_cache.metric.available", "", "1 if the source reports this KV-cache figure, 0 if it does not")
+        self.kv_used = r.gauge("mlx.kv_cache.used", "By", "KV cache held per source, tier (hot = memory, ssd = disk) and model")
+        self.kv_capacity = r.gauge("mlx.kv_cache.capacity", "By", "KV cache budget per source and tier")
+        self.kv_utilization = r.gauge("mlx.kv_cache.utilization", "%", "KV cache used / capacity per source and tier, only when a capacity is reported")
+        self.kv_entries = r.gauge("mlx.kv_cache.entries", "{entry}", "KV cache blocks held per source, tier and model")
+        self.kv_entries_capacity = r.gauge("mlx.kv_cache.entries.capacity", "{entry}", "Block pool size per source and tier, where the source reports one")
+        self.kv_lookups = ObservedCounter("mlx.kv_cache.lookups", "{lookup}", "KV cache lookups by result (hit/miss), the source's own counters since it started")
+        self.kv_hot_hits = ObservedCounter("mlx.kv_cache.hot_hits", "{lookup}", "OMLX: lookups served from the in-memory hot tier (a subset of hits)")
+        self.kv_evictions = ObservedCounter("mlx.kv_cache.evictions", "{block}", "KV cache blocks evicted per source and tier")
         for metric in (self.kv_lookups, self.kv_hot_hits, self.kv_evictions):
             r._add(metric)
         # Hardware (unprivileged sources only).
@@ -672,11 +694,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
         try:
             conn, resp = self._open_upstream(body, self._upstream_headers())
         except socket.timeout:
-            m.upstream_failures.add(1, reason="timeout")
+            m.upstream_failures.add(1, reason="timeout", framework=self.state.framework)
             self._send_json(504, {"error": "MLX-LM server timed out"})
             return
         except OSError:
-            m.upstream_failures.add(1, reason="connect")
+            m.upstream_failures.add(1, reason="connect", framework=self.state.framework)
             self._send_json(502, {"error": "MLX-LM server unavailable"})
             return
         try:
@@ -691,7 +713,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         except _ClientGone:
             self.close_connection = True
         except (socket.timeout, OSError):
-            m.upstream_failures.add(1, reason="read")
+            m.upstream_failures.add(1, reason="read", framework=self.state.framework)
             self.close_connection = True
         finally:
             conn.close()
@@ -722,18 +744,18 @@ class ProxyHandler(BaseHTTPRequestHandler):
                   "text_len": 0}
         labels = {"model": model, "endpoint": endpoint, "stream": "true" if stream else "false",
                   "framework": framework}
-        m.active.set(self._active_delta(1))
+        self._set_active(m, state, 1)
         conn = None
         try:
             try:
                 conn, resp = self._open_upstream(body, self._upstream_headers())
             except socket.timeout:
-                m.upstream_failures.add(1, reason="timeout")
+                m.upstream_failures.add(1, reason="timeout", framework=self.state.framework)
                 result.update(status=504, outcome="timeout")
                 self._send_json(504, {"error": "MLX-LM server timed out"})
                 return
             except OSError:
-                m.upstream_failures.add(1, reason="connect")
+                m.upstream_failures.add(1, reason="connect", framework=self.state.framework)
                 result.update(status=502, outcome="upstream_error")
                 self._send_json(502, {"error": "MLX-LM server unavailable"})
                 return
@@ -749,7 +771,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         finally:
             if conn is not None:
                 conn.close()
-            m.active.set(self._active_delta(-1))
+            self._set_active(m, state, -1)
             self._record(t0, labels, result)
 
     _active = 0
@@ -761,16 +783,21 @@ class ProxyHandler(BaseHTTPRequestHandler):
             cls._active += delta
             return cls._active
 
+    @classmethod
+    def _set_active(cls, metrics, state, delta):
+        # One series, labelled with the node's current framework.
+        metrics.active.replace([(cls._active_delta(delta), {"framework": state.framework})])
+
     def _relay_whole(self, resp, result, stream):
         try:
             data = resp.read()
         except socket.timeout:
-            self.metrics.upstream_failures.add(1, reason="timeout")
+            self.metrics.upstream_failures.add(1, reason="timeout", framework=self.state.framework)
             result.update(status=504, outcome="timeout")
             self._send_json(504, {"error": "MLX-LM server timed out"})
             return
         except OSError:
-            self.metrics.upstream_failures.add(1, reason="read")
+            self.metrics.upstream_failures.add(1, reason="read", framework=self.state.framework)
             result.update(status=502, outcome="upstream_error")
             self._send_json(502, {"error": "MLX-LM server connection failed"})
             return
@@ -824,12 +851,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 if out is not None:
                     self._write(out)
         except socket.timeout:
-            self.metrics.upstream_failures.add(1, reason="timeout")
+            self.metrics.upstream_failures.add(1, reason="timeout", framework=self.state.framework)
             result["outcome"] = "timeout"
         except _ClientGone:
             raise
         except OSError:
-            self.metrics.upstream_failures.add(1, reason="read")
+            self.metrics.upstream_failures.add(1, reason="read", framework=self.state.framework)
             result["outcome"] = "upstream_error"
         if result["t_end"] is None:
             result["t_end"] = time.monotonic()
@@ -968,7 +995,7 @@ def run_proxy(cfg, metrics, state):
     ProxyHandler.cfg, ProxyHandler.metrics, ProxyHandler.state = cfg, metrics, state
     server = ThreadingHTTPServer((cfg["proxy_host"], cfg["proxy_port"]), ProxyHandler)
     server.daemon_threads = True
-    LOG.info("proxy listening on %s:%s -> MLX-LM %s:%s", cfg["proxy_host"], cfg["proxy_port"],
+    LOG.info("proxy listening on %s:%s -> inference server %s:%s", cfg["proxy_host"], cfg["proxy_port"],
              cfg["upstream_host"], cfg["upstream_port"])
     return server
 
@@ -1043,8 +1070,21 @@ def _is_server_command(command, pattern, strict):
         return False
     if not strict:
         return True
-    argv0 = command.split(None, 1)[0] if command.strip() else ""
-    return bool(_SERVER_EXECUTABLES.match(os.path.basename(argv0)))
+    tokens = command.split()
+    if not tokens or not _SERVER_EXECUTABLES.match(os.path.basename(tokens[0])):
+        return False
+    # The server must be what runs (entry point, script or -m module, within
+    # the first tokens), not an argument passed to some other program.
+    return bool(pattern.search(" ".join(tokens[:4])))
+
+
+def _etime_seconds(value):
+    """ps etime ([[dd-]hh:]mm:ss) to seconds, or None."""
+    match = re.match(r"^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$", value or "")
+    if not match:
+        return None
+    days, hours, minutes, seconds = (int(g or 0) for g in match.groups())
+    return ((days * 24 + hours) * 60 + minutes) * 60 + seconds
 
 
 def _port_from_argv(command):
@@ -1123,6 +1163,12 @@ class Health:
         self.process_framework = None
         self.omlx = OMLXCollector(cfg, metrics) if cfg["omlx_enabled"] else None
         self.next_omlx = 0.0
+        self.vlm_cache = VLMCacheCollector(cfg, metrics, self._token) if cfg["vlm_cache_stats_enabled"] else None
+        self.next_vlm_cache = 0.0
+        self.process_counts = {}
+        # Set after the first tick: until then the framework is not known, and
+        # exporting would leave short-lived framework="unknown" series.
+        self.ready = threading.Event()
         self.last_pid = None
         self.raw_model = ""
         self.next_models = 0.0
@@ -1132,17 +1178,41 @@ class Health:
         self.thermal = _ThermalState()
         state.max_context = 0
         m = metrics
-        for check in ("http", "models", "inference"):
-            m.check_failures.touch(check=check)
-        m.process_restarts.touch()
-        m.upstream_failures.touch(reason="connect")
         m.export_failures.touch()
-        m.telemetry_info.set(1, version=VERSION,
-                             proxy="enabled" if cfg["proxy_enabled"] else "disabled",
-                             hardware="enabled" if cfg["hardware_metrics_enabled"] else "disabled",
-                             quality="enabled" if cfg["quality_metrics_enabled"] else "disabled",
-                             omlx="enabled" if cfg["omlx_enabled"] else "disabled")
+        self.info = {"version": VERSION,
+                     "proxy": "enabled" if cfg["proxy_enabled"] else "disabled",
+                     "hardware": "enabled" if cfg["hardware_metrics_enabled"] else "disabled",
+                     "quality": "enabled" if cfg["quality_metrics_enabled"] else "disabled",
+                     "omlx": "enabled" if cfg["omlx_enabled"] else "disabled"}
+        self._publish_framework()
         m.activity_expected.set(1 if cfg["activity_expected"] else 0)
+
+    # Node-level series that carry the node's framework. On a change they are
+    # relabelled in place, so no series is ever exported without the label and
+    # the old framework's series stop at once.
+    def _framework_gauges(self):
+        m = self.m
+        return (m.server_up, m.models_api_up, m.probe_up, m.probe_duration, m.check_last_success,
+                m.check_duration, m.process_up, m.process_rss, m.process_footprint, m.process_cpu,
+                m.process_uptime, m.launchd_runs, m.active)
+
+    @property
+    def fw(self):
+        return {"framework": self.state.framework}
+
+    def _publish_framework(self):
+        m, fw = self.m, self.fw
+        m.telemetry_info.replace([(1, dict(self.info, **fw))])
+        # Zeros, so "no failures yet" is distinguishable from "no telemetry".
+        # Not for "unknown" (the state before the first detection), which would
+        # otherwise leave flat zero series for a framework the node never had.
+        if fw["framework"] != "unknown":
+            for check in ("http", "models", "inference"):
+                m.check_failures.touch(check=check, **fw)
+            m.process_restarts.touch(**fw)
+            m.upstream_failures.touch(reason="connect", **fw)
+        for gauge in self._framework_gauges():
+            gauge.relabel("framework", fw["framework"])
 
     def run_forever(self, stop):
         while not stop.is_set():
@@ -1157,6 +1227,8 @@ class Health:
         now = time.monotonic()
         self.check_process()
         self.check_http()
+        # Before the probe and the KV poll, which depend on the framework.
+        self.update_framework()
         if now >= self.next_models:
             self.next_models = now + self.cfg["models_check_interval_seconds"]
             self.check_models()
@@ -1169,9 +1241,12 @@ class Health:
         if self.omlx is not None and now >= self.next_omlx:
             self.next_omlx = now + self.cfg["omlx_poll_interval_seconds"]
             self.omlx.poll()
-        self.update_framework()
+        if self.vlm_cache is not None and now >= self.next_vlm_cache:
+            self.next_vlm_cache = now + self.cfg["models_check_interval_seconds"]
+            self.vlm_cache.poll(self.state.framework == "mlx-vlm", self.base, self.state.served_model or "unknown")
         self.update_model()
         self.m.telemetry_up.set(1)
+        self.ready.set()
 
     def update_framework(self):
         """Inventory override, else what answers on the upstream port, else
@@ -1185,8 +1260,13 @@ class Health:
         else:
             framework, source = "unknown", "none"
         with self.state.lock:
+            changed = framework != self.state.framework
             self.state.framework, self.state.framework_source = framework, source
+        if changed:
+            self._publish_framework()
         self.m.framework_info.replace([(1, {"framework": framework, "source": source})])
+        self.m.framework_processes.replace(
+            [(self.process_counts.get(name, 0), {"framework": name}) for name in FRAMEWORKS])
 
     def _token(self):
         return _read_secret(self.cfg["upstream_api_key_file"])
@@ -1210,37 +1290,37 @@ class Health:
         return {}
 
     def check_process(self):
-        m = self.m
+        m, fw = self.m, self.fw
         pid, command = None, ""
         info = self._launchd()
         if info is not None:
             if "runs" in info:
-                m.launchd_runs.set(info["runs"])
+                m.launchd_runs.set(info["runs"], **fw)
             if info.get("running") and info.get("pid"):
                 pid = info["pid"]
         rc, out = _run(["ps", "-axww", "-o", "pid=,command="])
         pid, command, self.process_framework = self.select_process(out, pid)
         if pid is None:
-            m.process_up.set(0)
-            m.process_rss.set(None)
-            m.process_cpu.set(None)
-            m.process_footprint.set(None)
+            m.process_up.set(0, **fw)
+            for gauge in (m.process_rss, m.process_cpu, m.process_footprint, m.process_uptime):
+                gauge.set(None, **fw)
             return
-        m.process_up.set(1)
+        m.process_up.set(1, **fw)
         if self.last_pid is not None and pid != self.last_pid:
-            m.process_restarts.add(1)
+            m.process_restarts.add(1, **fw)
         self.last_pid = pid
         if command:
             self.raw_model = _model_from_argv(command) or self.raw_model
-        rc, out = _run(["ps", "-o", "rss=,%cpu=", "-p", str(pid)])
+        rc, out = _run(["ps", "-o", "rss=,%cpu=,etime=", "-p", str(pid)])
         fields = out.split()
-        if rc == 0 and len(fields) >= 2:
+        if rc == 0 and len(fields) >= 3:
             try:
-                m.process_rss.set(int(fields[0]) * 1024)
-                m.process_cpu.set(float(fields[1]))
+                m.process_rss.set(int(fields[0]) * 1024, **fw)
+                m.process_cpu.set(float(fields[1]), **fw)
             except ValueError:
                 pass
-        m.process_footprint.set(_footprint(pid))
+            m.process_uptime.set(_etime_seconds(fields[2]), **fw)
+        m.process_footprint.set(_footprint(pid), **fw)
 
     def classify(self, command, strict=True):
         for framework, pattern, is_default in self.patterns:
@@ -1251,12 +1331,13 @@ class Health:
     def select_process(self, ps_output, launchd_pid=None):
         """Return (pid, command, framework) of the inference server, or
         (None, "", None). With a launchd pid, that process is the server and
-        is only classified. Otherwise, among MLX-LM / MLX-VLM server processes,
-        prefer the one serving the upstream port (--port, or no --port when the
-        upstream is the servers' default 8080), then the framework that answers
-        on the port."""
+        is only classified. Otherwise only MLX-LM / MLX-VLM server processes
+        serving the upstream port count (--port, or no --port when the upstream
+        is the servers' default 8080), preferring the framework that answers on
+        the port. A server started without --port on another port needs
+        mlx_launchagent_label or llm_framework."""
         me = os.getpid()
-        candidates = []
+        candidates, launchd_match = [], None
         for line in ps_output.splitlines():
             parts = line.strip().split(None, 1)
             if len(parts) != 2 or not parts[0].isdigit():
@@ -1264,24 +1345,29 @@ class Health:
             this_pid, this_cmd = int(parts[0]), parts[1]
             if this_pid == me or "mlx_telemetry" in this_cmd or "mlx-telemetry" in this_cmd:
                 continue
-            if launchd_pid is not None:
-                if this_pid == launchd_pid:
-                    return this_pid, this_cmd, self.classify(this_cmd, strict=False)
-                continue
+            if launchd_pid is not None and this_pid == launchd_pid:
+                launchd_match = (this_pid, this_cmd, self.classify(this_cmd, strict=False))
             framework = self.classify(this_cmd)
             if framework:
                 candidates.append((this_pid, this_cmd, framework))
+        # Reported per framework, so a Mac genuinely running both shows both.
+        self.process_counts = {}
+        for _pid, _cmd, framework in candidates:
+            self.process_counts[framework] = self.process_counts.get(framework, 0) + 1
         if launchd_pid is not None:
-            return launchd_pid, "", None
-        if not candidates:
-            return None, "", None
+            return launchd_match or (launchd_pid, "", None)
         port = self.cfg["upstream_port"]
 
-        def rank(candidate):
+        def serves_port(candidate):
             argv_port = _port_from_argv(candidate[1])
-            serves_port = argv_port == port or (argv_port is None and port == 8080)
-            return (0 if serves_port else 1, 0 if candidate[2] == self.http_framework else 1)
-        return min(candidates, key=rank)
+            return argv_port == port or (argv_port is None and port == 8080)
+        # A server on another port is not this node's server (it is still
+        # counted above): without this, a stopped server would be "replaced"
+        # by any other MLX server on the Mac.
+        mine = [c for c in candidates if serves_port(c)]
+        if not mine:
+            return None, "", None
+        return min(mine, key=lambda c: 0 if c[2] == self.http_framework else 1)
 
     # -- endpoints -----------------------------------------------------------
 
@@ -1293,11 +1379,11 @@ class Health:
             ok = bool(fn())
         except Exception:
             ok = False
-        m.check_duration.set(time.monotonic() - started, check=name)
+        m.check_duration.set(time.monotonic() - started, check=name, **self.fw)
         if ok:
-            m.check_last_success.set(time.time(), check=name)
+            m.check_last_success.set(time.time(), check=name, **self.fw)
         else:
-            m.check_failures.add(1, check=name)
+            m.check_failures.add(1, check=name, **self.fw)
         return ok
 
     def check_http(self):
@@ -1309,7 +1395,7 @@ class Health:
             # API key) or 503 (MLX-LM still loading).
             self.http_framework = framework_from_response(headers, data)
             return status == 200
-        self.m.server_up.set(1 if self._check("http", health) else 0)
+        self.m.server_up.set(1 if self._check("http", health) else 0, **self.fw)
 
     def check_models(self):
         def models():
@@ -1321,7 +1407,7 @@ class Health:
             with self.state.lock:
                 self.state.known_models = set(i for i in ids if i)
             return True
-        self.m.models_api_up.set(1 if self._check("models", models) else 0)
+        self.m.models_api_up.set(1 if self._check("models", models) else 0, **self.fw)
 
     def probe(self):
         cfg = self.cfg
@@ -1350,8 +1436,8 @@ class Health:
             with urllib.request.urlopen(req, timeout=cfg["proxy_read_timeout_seconds"]) as resp:  # noqa: S310
                 return resp.status == 200
         ok = self._check("inference", inference)
-        self.m.probe_up.set(1 if ok else 0)
-        self.m.probe_duration.set(time.monotonic() - started)
+        self.m.probe_up.set(1 if ok else 0, **self.fw)
+        self.m.probe_duration.set(time.monotonic() - started, **self.fw)
 
     def update_model(self):
         cfg, m, state = self.cfg, self.m, self.state
@@ -1438,30 +1524,33 @@ class _ThermalState:
 
 
 # --------------------------------------------------------------------------
-# OMLX KV cache (optional)
+# KV cache: MLX-VLM's prefix cache and (optional) OMLX
 # --------------------------------------------------------------------------
 
-# Figures OMLX's admin stats carry, and the ones it does not. "allocated" has
-# no OMLX counterpart separate from "used": the hot tier's size is the memory
-# it holds. Dashboards read this to say "Unavailable" instead of showing 0.
-_OMLX_FIGURES = ("hot_used", "hot_capacity", "ssd_used", "ssd_capacity", "lookups", "evictions")
+# Figures a source may report. "allocated" has no counterpart separate from
+# "used" in either source (each reports what its tiers hold and their
+# budget), so it is always reported unavailable. Dashboards read
+# mlx_kv_cache_metric_available to say "Unavailable" instead of showing 0.
+_KV_FIGURES = ("hot_used", "hot_capacity", "ssd_used", "ssd_capacity", "lookups", "evictions")
 
 
-class OMLXCollector:
-    """Polls OMLX's documented admin endpoint GET /admin/api/stats (Bearer =
-    OMLX's main API key; no key needed when OMLX runs loopback-only with
-    authentication disabled) and copies its KV-cache figures.
+def _num(source, key):
+    value = source.get(key) if isinstance(source, dict) else None
+    return value if _is_number(value) and value >= 0 else None
 
-    Only the runtime_cache block and uptime are read. The response also
-    carries OMLX's own API key and paths; those fields are never read,
-    exported or logged. Nothing is sent to OMLX except this GET."""
+
+class KVCollector:
+    """Shared publishing for one KV-cache source (label source=<name>)."""
+    source = ""
 
     def __init__(self, cfg, metrics):
         self.cfg, self.m = cfg, metrics
-        self.url = cfg["omlx_url"].rstrip("/") + "/admin/api/stats"
         self.models = set()
-        metrics.omlx_failures.touch(reason="connect")
-        metrics.omlx_up.set(0)
+
+    def start_reporting(self):
+        """Series appear only once the source applies to this node."""
+        self.m.kv_failures.touch(source=self.source, reason="connect")
+        self.m.kv_up.replace([(0, {"source": self.source})], source=self.source)
 
     def _model(self, value):
         model = sanitize_model(value) or "unknown"
@@ -1471,98 +1560,187 @@ class OMLXCollector:
             self.models.add(model)
         return model
 
-    def poll(self):
-        m = self.m
+    def _get(self, url, timeout, token):
+        """Returns the decoded JSON object, or the failure reason."""
         try:
-            status, data = _http_get(self.url, self.cfg["omlx_timeout_seconds"],
-                                     _read_secret(self.cfg["omlx_api_key_file"]))
+            status, data = _http_get(url, timeout, token)
         except (OSError, ValueError):
-            return self._fail("connect")
+            return "connect"
         if status in (401, 403):
-            return self._fail("auth")
+            return "auth"
         if status != 200:
-            return self._fail("http")
+            return "http"
         try:
             obj = json.loads(data.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
-            return self._fail("parse")
-        cache = obj.get("runtime_cache") if isinstance(obj, dict) else None
-        if not isinstance(cache, dict):
-            return self._fail("parse")
-        self.apply(cache, obj.get("uptime_seconds"))
-        m.omlx_up.set(1)
+            return "parse"
+        return obj if isinstance(obj, dict) else "parse"
 
-    def _fail(self, reason):
-        self.m.omlx_failures.add(1, reason=reason)
-        self.m.omlx_up.set(0)
-        self._clear()
+    def fail(self, reason):
+        self.m.kv_failures.add(1, source=self.source, reason=reason)
+        self.clear(up=0)
 
-    def _clear(self):
+    def clear(self, up):
         """Stale KV figures would read as current, so drop them all."""
-        m = self.m
-        for gauge in (m.kv_used, m.kv_capacity, m.kv_utilization, m.kv_entries):
-            gauge.replace([])
+        m, src = self.m, self.source
+        for gauge in (m.kv_used, m.kv_capacity, m.kv_utilization, m.kv_entries, m.kv_entries_capacity, m.kv_enabled):
+            gauge.replace([], source=src)
         for counter in (m.kv_lookups, m.kv_hot_hits, m.kv_evictions):
-            counter.retain("model", ())
-        m.omlx_available.replace([(0, {"metric": name}) for name in _OMLX_FIGURES + ("allocated",)])
+            counter.retain(src, ())
+        m.kv_available.replace([(0, {"source": src, "metric": name}) for name in _KV_FIGURES + ("allocated",)], source=src)
+        m.kv_up.replace([(up, {"source": src})], source=src)
+
+    def publish(self, used, capacities, entries, entries_capacity, seen):
+        """used/entries: [(value, {"tier", "model"})]; capacities and
+        entries_capacity: {tier: value or None}. Utilisation per tier = the
+        sum over models / that tier's capacity, only when a capacity (> 0) is
+        reported."""
+        m, src = self.m, self.source
+        tag = lambda series: [(v, dict(labels, source=src)) for v, labels in series]  # noqa: E731
+        m.kv_used.replace(tag(used), source=src)
+        m.kv_entries.replace(tag(entries), source=src)
+        m.kv_entries_capacity.replace([(v, {"source": src, "tier": t}) for t, v in entries_capacity.items() if v], source=src)
+        capacity, utilization = [], []
+        for tier, cap in capacities.items():
+            seen[tier + "_capacity"] = bool(cap)
+            if not cap:
+                continue
+            capacity.append((cap, {"source": src, "tier": tier}))
+            tier_used = [value for value, labels in used if labels["tier"] == tier]
+            if tier_used:
+                utilization.append((min(100.0, 100.0 * sum(tier_used) / cap), {"source": src, "tier": tier}))
+        m.kv_capacity.replace(capacity, source=src)
+        m.kv_utilization.replace(utilization, source=src)
+        m.kv_available.replace([(1 if seen.get(name) else 0, {"source": src, "metric": name}) for name in _KV_FIGURES]
+                               + [(0, {"source": src, "metric": "allocated"})], source=src)
+        m.kv_enabled.replace([(1, {"source": src})], source=src)
+        m.kv_up.replace([(1, {"source": src})], source=src)
+
+
+class OMLXCollector(KVCollector):
+    """Polls OMLX's documented admin endpoint GET /admin/api/stats (Bearer =
+    OMLX's main API key; no key needed when OMLX runs loopback-only with
+    authentication disabled) and copies its KV-cache figures.
+
+    Only the runtime_cache block and uptime are read. The response also
+    carries OMLX's own API key and paths; those fields are never read,
+    exported or logged. Nothing is sent to OMLX except this GET."""
+    source = "omlx"
+
+    def __init__(self, cfg, metrics):
+        KVCollector.__init__(self, cfg, metrics)
+        self.url = cfg["omlx_url"].rstrip("/") + "/admin/api/stats"
+        self.start_reporting()
+
+    def poll(self):
+        obj = self._get(self.url, self.cfg["omlx_timeout_seconds"], _read_secret(self.cfg["omlx_api_key_file"]))
+        if isinstance(obj, str):
+            return self.fail(obj)
+        cache = obj.get("runtime_cache")
+        if not isinstance(cache, dict):
+            return self.fail("parse")
+        self.apply(cache, obj.get("uptime_seconds"))
 
     def apply(self, cache, uptime=None):
-        m = self.m
-        now = time.time()
-        start_ns = int((now - uptime) * 1e9) if _is_number(uptime) and uptime >= 0 else m.registry.start_ns
-        models = [row for row in cache.get("models") or [] if isinstance(row, dict)]
-
-        def num(source, key):
-            value = source.get(key)
-            return value if _is_number(value) and value >= 0 else None
-
+        m, src = self.m, self.source
+        start_ns = int((time.time() - uptime) * 1e9) if _is_number(uptime) and uptime >= 0 else m.registry.start_ns
         used, entries, present = [], [], set()
         seen = {"hot_used": False, "ssd_used": False, "lookups": False, "evictions": False}
-        for row in models:
+        for row in [r for r in cache.get("models") or [] if isinstance(r, dict)]:
             model = self._model(row.get("id"))
             present.add(model)
             for tier, size_key, count_key in (("hot", "hot_cache_size_bytes", "hot_cache_entries"),
                                               ("ssd", "total_size_bytes", "num_files")):
-                size, count = num(row, size_key), num(row, count_key)
+                size, count = _num(row, size_key), _num(row, count_key)
                 if size is not None:
                     used.append((size, {"tier": tier, "model": model}))
                     seen[tier + "_used"] = True
                 if count is not None:
                     entries.append((count, {"tier": tier, "model": model}))
-            hits, misses = num(row, "hits"), num(row, "misses")
+            hits, misses = _num(row, "hits"), _num(row, "misses")
             if hits is not None and misses is not None:
-                m.kv_lookups.observe_total(hits, start_ns, model=model, result="hit")
-                m.kv_lookups.observe_total(misses, start_ns, model=model, result="miss")
+                m.kv_lookups.observe_total(hits, start_ns, source=src, model=model, result="hit")
+                m.kv_lookups.observe_total(misses, start_ns, source=src, model=model, result="miss")
                 seen["lookups"] = True
-            if num(row, "hot_cache_hits") is not None:
-                m.kv_hot_hits.observe_total(num(row, "hot_cache_hits"), start_ns, model=model)
+            if _num(row, "hot_cache_hits") is not None:
+                m.kv_hot_hits.observe_total(_num(row, "hot_cache_hits"), start_ns, source=src, model=model)
             for tier, key in (("ssd", "evictions"), ("hot", "hot_cache_evictions")):
-                if num(row, key) is not None:
-                    m.kv_evictions.observe_total(num(row, key), start_ns, model=model, tier=tier)
+                if _num(row, key) is not None:
+                    m.kv_evictions.observe_total(_num(row, key), start_ns, source=src, model=model, tier=tier)
                     seen["evictions"] = True
         for counter in (m.kv_lookups, m.kv_hot_hits, m.kv_evictions):
-            counter.retain("model", present)
-        m.kv_used.replace(used)
-        m.kv_entries.replace(entries)
+            counter.retain(src, present)
+        # Process-wide budgets: OMLX keeps the largest per-model cap. 0 means
+        # no budget (hot tier off, SSD cache disabled).
+        self.publish(used, {"hot": _num(cache, "hot_cache_max_bytes"), "ssd": _num(cache, "disk_max_bytes")},
+                     entries, {}, seen)
 
-        # Capacities are process-wide budgets (OMLX keeps the largest per-model
-        # cap), so utilisation is per tier: the sum over models / that budget.
-        # A 0 capacity means "no budget reported" (hot tier off, or SSD cache
-        # disabled), so no utilisation is computed for that tier.
-        capacity, utilization = [], []
-        for tier, cap_key in (("hot", "hot_cache_max_bytes"), ("ssd", "disk_max_bytes")):
-            cap = num(cache, cap_key)
-            seen[tier + "_capacity"] = bool(cap)
-            if not cap:
-                continue
-            capacity.append((cap, {"tier": tier}))
-            tier_used = [value for value, labels in used if labels["tier"] == tier]
-            if tier_used:
-                utilization.append((min(100.0, 100.0 * sum(tier_used) / cap), {"tier": tier}))
-        m.kv_capacity.replace(capacity)
-        m.kv_utilization.replace(utilization)
-        m.omlx_available.replace([(1 if seen.get(name) else 0, {"metric": name}) for name in _OMLX_FIGURES]
-                                 + [(0, {"metric": "allocated"})])
+
+class VLMCacheCollector(KVCollector):
+    """MLX-VLM's Automatic Prefix Cache, GET <server>/v1/cache/stats (the same
+    server and API key as the health checks). Polled only while the node's
+    framework is mlx-vlm. With APC off (MLX-VLM's default; APC_ENABLED=1
+    turns it on) the server answers {"enabled": false}: reported as
+    mlx_kv_cache_enabled 0 with every figure unavailable, never as zeros.
+
+    Mapping (mlx-vlm 0.7.11 stats_snapshot): hot used = resident_bytes,
+    capacity = memory_max_bytes (its resident budget); entries = pool_used of
+    num_blocks; lookups = lookups_hit / lookups_miss; hot evictions = block
+    pool evictions; ssd used / capacity / evictions = disk_bytes /
+    disk_max_bytes (0 = uncapped) / disk_evictions. MLX-VLM serves one model,
+    so the model label is the node's served model."""
+    source = "mlx-vlm"
+
+    def __init__(self, cfg, metrics, token):
+        KVCollector.__init__(self, cfg, metrics)
+        self.token = token
+        self.start_ns = metrics.registry.start_ns
+        self.active = False
+
+    def poll(self, is_vlm, base, model="unknown"):
+        if not is_vlm:
+            if self.active:
+                # The node stopped running MLX-VLM: drop its figures entirely.
+                self.clear(up=0)
+                self.m.kv_up.replace([], source=self.source)
+                self.active = False
+            return
+        if not self.active:
+            self.start_reporting()
+            self.active = True
+        obj = self._get(base + "/v1/cache/stats", 10, self.token())
+        if isinstance(obj, str):
+            return self.fail(obj)
+        if obj.get("enabled") is not True:
+            self.clear(up=1)
+            self.m.kv_enabled.replace([(0, {"source": self.source})], source=self.source)
+            return
+        self.apply(obj, model)
+
+    def apply(self, snap, model):
+        m, src = self.m, self.source
+        model = self._model(model)
+        seen = {}
+        used, entries = [], []
+        for tier, key in (("hot", "resident_bytes"), ("ssd", "disk_bytes")):
+            if _num(snap, key) is not None:
+                used.append((_num(snap, key), {"tier": tier, "model": model}))
+                seen[tier + "_used"] = True
+        if _num(snap, "pool_used") is not None:
+            entries.append((_num(snap, "pool_used"), {"tier": "hot", "model": model}))
+        hits, misses = _num(snap, "lookups_hit"), _num(snap, "lookups_miss")
+        if hits is not None and misses is not None:
+            m.kv_lookups.observe_total(hits, self.start_ns, source=src, model=model, result="hit")
+            m.kv_lookups.observe_total(misses, self.start_ns, source=src, model=model, result="miss")
+            seen["lookups"] = True
+        for tier, key in (("hot", "evictions"), ("ssd", "disk_evictions")):
+            if _num(snap, key) is not None:
+                m.kv_evictions.observe_total(_num(snap, key), self.start_ns, source=src, model=model, tier=tier)
+                seen["evictions"] = True
+        for counter in (m.kv_lookups, m.kv_evictions):
+            counter.retain(src, {model})
+        self.publish(used, {"hot": _num(snap, "memory_max_bytes"), "ssd": _num(snap, "disk_max_bytes")},
+                     entries, {"hot": _num(snap, "num_blocks")}, seen)
 
 
 # --------------------------------------------------------------------------
@@ -1570,8 +1748,9 @@ class OMLXCollector:
 # --------------------------------------------------------------------------
 
 class Exporter:
-    def __init__(self, cfg, metrics):
+    def __init__(self, cfg, metrics, ready=None):
         self.cfg, self.m = cfg, metrics
+        self.ready = ready
         self._last_error_log = None
 
     def export_once(self):
@@ -1590,6 +1769,9 @@ class Exporter:
             return False
 
     def run_forever(self, stop):
+        if self.ready is not None:
+            # Bounded, so a stuck first tick never stops the export.
+            self.ready.wait(max(30.0, 2 * self.cfg["health_check_interval_seconds"]))
         while not stop.wait(self.cfg["export_interval_seconds"]):
             self.export_once()
         self.export_once()
@@ -1626,7 +1808,7 @@ def main(argv=None):
     state = State(cfg)
     stop = threading.Event()
     health = Health(cfg, metrics, state)
-    exporter = Exporter(cfg, metrics)
+    exporter = Exporter(cfg, metrics, health.ready)
     server = None
     if cfg["proxy_enabled"]:
         try:
@@ -1634,7 +1816,7 @@ def main(argv=None):
         except OSError as exc:
             LOG.error("cannot listen on %s:%s: %s", cfg["proxy_host"], cfg["proxy_port"], exc)
             return 1
-        metrics.active.set(0)
+        metrics.active.replace([(0, {"framework": state.framework})])
 
     def shutdown(signum, _frame):
         LOG.info("received signal %s, shutting down", signum)

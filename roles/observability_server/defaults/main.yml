@@ -89,6 +89,8 @@ observability_server_llm_dashboards:
 # rules: 10 minutes for rates and quantiles, 15 minutes for restarts.
 llm_alert_ttft_p95_seconds: 5
 llm_alert_generation_p95_seconds: 120
+# p95 end-to-end duration of successful requests, streaming and non-streaming.
+llm_alert_request_p95_seconds: 60
 llm_alert_error_rate_percent: 5
 # Error-rate alert needs at least this many requests in the window.
 llm_alert_min_requests: 5
@@ -97,6 +99,8 @@ llm_alert_inactivity_minutes: 60
 # 1 = warning, 2 = critical (kern.memorystatus_vm_pressure_level).
 llm_alert_memory_pressure_level: 2
 llm_alert_restarts_per_15m: 2
+# Failed OTLP exports from the telemetry agent to its local collector.
+llm_alert_export_failures_per_15m: 3
 llm_alert_stale_minutes: 10
 # 2 = serious, 3 = critical (NSProcessInfo.thermalState).
 llm_alert_thermal_state: 2

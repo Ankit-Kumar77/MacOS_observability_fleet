@@ -4,8 +4,9 @@
     docs/LLM_OBSERVABILITY.md. -#}
 {% import 'llm_dashboard_macros.j2' as m %}
 {% set H = 'host_name="$host"' %}
+{% set HF = H ~ ', framework=~"$framework"' %}
 {% set F = 'host_name="$host", model=~"$model", framework=~"$framework"' %}
-{% set proxy0 = ' or on() (0 * sum(mlx_telemetry_info{' ~ H ~ ', proxy="enabled"}))' %}
+{% set proxy0 = ' or on() (0 * sum(mlx_telemetry_info{' ~ HF ~ ', proxy="enabled"}))' %}
 {% set ri = '[$__rate_interval]' %}
 {%- macro hq(quantile, metric, window='[$__rate_interval]') -%}
 histogram_quantile({{ quantile }}, sum by (le) (rate({{ metric }}_bucket{ {{- F -}} }{{ window }})))
@@ -52,15 +53,15 @@ histogram_quantile({{ quantile }}, sum by (le) (rate({{ metric }}_bucket{ {{- F 
   },
   "panels": [
     {{ m.row(1, "Status", 0) }},
-    {{ m.stat(2, "Node", 'max by (host_name) (mlx_telemetry_info{' ~ H ~ '})', 0, 1, w=4, legend=m.lg('host_name'), text_mode="name", color_mode="none",
+    {{ m.stat(2, "Node", 'max by (host_name) (mlx_telemetry_info{' ~ HF ~ '})', 0, 1, w=4, legend=m.lg('host_name'), text_mode="name", color_mode="none",
         desc="Host name as reported by the collector.", no_value="No LLM telemetry") }},
     {{ m.stat(3, "Model served", 'max by (model) (mlx_model_info{' ~ H ~ '})', 4, 1, w=5, legend=m.lg('model'), text_mode="name", color_mode="none",
         desc="--model argument of the running server (a path is reduced to its last component), llm_model_name, or the single model /v1/models lists.", no_value="Not detected") }},
-    {{ m.stat(4, "Server /health", 'max(mlx_server_up{' ~ H ~ '})', 9, 1, w=3, mappings=m.up_down, spec=[["red", None], ["green", 1]], color_mode="background",
+    {{ m.stat(4, "Server /health", 'max(mlx_server_up{' ~ HF ~ '})', 9, 1, w=3, mappings=m.up_down, spec=[["red", None], ["green", 1]], color_mode="background",
         desc="Last /health check: 200 = Up.", no_value="No LLM telemetry") }},
-    {{ m.stat(5, "Server process", 'max(mlx_process_up{' ~ H ~ '})', 12, 1, w=3, mappings=m.up_down, spec=[["red", None], ["green", 1]], color_mode="background",
+    {{ m.stat(5, "Server process", 'max(mlx_process_up{' ~ HF ~ '})', 12, 1, w=3, mappings=m.up_down, spec=[["red", None], ["green", 1]], color_mode="background",
         desc="An mlx_lm.server or mlx_vlm.server process was found (by mlx_launchagent_label, or by mlx_process_pattern / mlx_vlm_process_pattern).", no_value="No LLM telemetry") }},
-    {{ m.stat(6, "Since last health OK", 'time() - max(mlx_health_last_success_timestamp_seconds{check="http", ' ~ H ~ '})', 15, 1, w=3, unit="s", decimals=0,
+    {{ m.stat(6, "Since last health OK", 'time() - max(mlx_health_last_success_timestamp_seconds{check="http", ' ~ HF ~ '})', 15, 1, w=3, unit="s", decimals=0,
         spec=[["green", None], ["orange", 60], ["red", 300]], desc="Seconds since /health last answered 200.", no_value="Never succeeded") }},
     {{ m.stat(7, "Requests (5m)", 'sum(increase(mlx_requests_total{' ~ F ~ '}[5m]))' ~ proxy0, 18, 1, w=3, decimals=0,
         desc="Requests through the telemetry proxy in the last 5 minutes.", no_value="No proxy telemetry") }},
@@ -74,7 +75,7 @@ histogram_quantile({{ quantile }}, sum by (le) (rate({{ metric }}_bucket{ {{- F 
         spec=[["green", None], ["orange", 80], ["red", 90]], desc="Existing host metrics; inactive memory is not counted as used.") }},
     {{ m.stat(12, "Memory pressure", 'max(macos_memory_pressure_level{' ~ H ~ '})', 6, 6, w=3, h=5, mappings=m.pressure_map,
         spec=[["green", None], ["orange", 1], ["red", 2]], color_mode="background", desc="Kernel memory pressure level (sysctl kern.memorystatus_vm_pressure_level).", no_value="Not collected") }},
-    {{ m.stat(13, "Server footprint", 'max(mlx_process_memory_footprint_bytes{' ~ H ~ '})', 9, 6, w=3, h=5, unit="bytes", decimals=1,
+    {{ m.stat(13, "Server footprint", 'max(mlx_process_memory_footprint_bytes{' ~ HF ~ '})', 9, 6, w=3, h=5, unit="bytes", decimals=1,
         desc="Physical footprint of the server process, including Metal buffers (weights, KV cache). RSS is shown in the time series below.", no_value="Process not found") }},
     {{ m.stat(14, "Disk used (/)", disk_used_pct, 12, 6, w=3, h=5, type="gauge", unit="percent", decimals=1, min=0, max=100,
         spec=[["green", None], ["orange", 80], ["red", 90]], desc="Existing host metrics.") }},
@@ -97,7 +98,7 @@ histogram_quantile({{ quantile }}, sum by (le) (rate({{ metric }}_bucket{ {{- F 
         desc="Existing host metrics by state (free / inactive / used).", min=0) }},
     {{ m.ts(25, "Memory pressure level", [{"expr": 'max(macos_memory_pressure_level{' ~ H ~ '})', "legend": "pressure"}], 16, 15, w=8, unit="short", decimals=0, min=0, max=2,
         desc="0 normal, 1 warning, 2 critical.", no_value="Not collected") }},
-    {{ m.ts(26, "Server process memory and CPU", [{"expr": 'max(mlx_process_memory_footprint_bytes{' ~ H ~ '})', "legend": "footprint"}, {"expr": 'max(mlx_process_memory_rss_bytes{' ~ H ~ '})', "legend": "RSS"}, {"expr": 'max(mlx_process_cpu_utilization_percent{' ~ H ~ '})', "legend": "CPU %"}], 0, 23, w=8, unit="bytes",
+    {{ m.ts(26, "Server process memory and CPU", [{"expr": 'max(mlx_process_memory_footprint_bytes{' ~ HF ~ '})', "legend": "footprint"}, {"expr": 'max(mlx_process_memory_rss_bytes{' ~ HF ~ '})', "legend": "RSS"}, {"expr": 'max(mlx_process_cpu_utilization_percent{' ~ HF ~ '})', "legend": "CPU %"}], 0, 23, w=8, unit="bytes",
         desc="Footprint includes Metal buffers; RSS mostly does not. CPU % is ps %cpu (100 = one core).", no_value="Process not found", min=0,
         overrides=[{"matcher": {"id": "byName", "options": "CPU %"}, "properties": [{"id": "unit", "value": "percent"}, {"id": "custom.axisPlacement", "value": "right"}]}]) }},
     {{ m.ts(27, "Disk used (/)", [{"expr": disk_used_pct, "legend": "used %"}], 8, 23, w=8, unit="percent", min=0, max=100, desc="Existing host metrics.") }},
@@ -120,7 +121,7 @@ histogram_quantile({{ quantile }}, sum by (le) (rate({{ metric }}_bucket{ {{- F 
         desc="From MLX-LM usage blocks.", no_value="No proxy telemetry") }},
     {{ m.ts(37, "Completion tokens/s per request", [{"expr": hq(0.5, 'mlx_completion_tokens_per_second'), "legend": "p50"}, {"expr": hq(0.95, 'mlx_completion_tokens_per_second'), "legend": "p95"}], 8, 48, w=8, unit="short", min=0,
         desc="(completion_tokens - 1) / generation duration, streaming requests with usage.", no_value="No streaming requests") }},
-    {{ m.ts(38, "Active requests", [{"expr": 'sum(mlx_requests_active{' ~ H ~ '})', "legend": "active"}], 16, 48, w=8, unit="short", decimals=0, min=0,
+    {{ m.ts(38, "Active requests", [{"expr": 'sum(mlx_requests_active{' ~ HF ~ '})', "legend": "active"}], 16, 48, w=8, unit="short", decimals=0, min=0,
         desc="Requests in flight through the proxy.", no_value="No proxy telemetry") }},
     {{ m.ts(39, "Errors by status", [{"expr": 'sum by (status_code, outcome) (increase(mlx_requests_total{' ~ F ~ ', outcome!="success"}' ~ ri ~ '))', "legend": m.lg('status_code') ~ " " ~ m.lg('outcome')}], 0, 56, w=8, unit="short", min=0, draw="bars",
         desc="Failed requests per interval.", no_value="No proxy telemetry") }},
@@ -134,18 +135,18 @@ histogram_quantile({{ quantile }}, sum by (le) (rate({{ metric }}_bucket{ {{- F 
         desc="client_error = 4xx from the server, server_error = 5xx or an error event inside a stream, upstream_error = proxy could not reach/read the server, timeout, client_disconnected.", no_value="No proxy telemetry") }},
     {{ m.ts(44, "Latency spikes", [{"expr": hq(0.99, 'mlx_request_duration_seconds'), "legend": "end-to-end p99"}, {"expr": hq(0.99, 'mlx_time_to_first_token_seconds'), "legend": "TTFT p99"}], 8, 65, w=8, unit="s", min=0,
         desc="99th percentiles from histogram buckets; spikes stand out against the p50/p95 panels above.", no_value="No proxy telemetry") }},
-    {{ m.ts(45, "Server restarts", [{"expr": 'sum(increase(mlx_process_restarts_total{' ~ H ~ '}' ~ ri ~ '))', "legend": "pid changes"}, {"expr": 'max(changes(mlx_process_launchd_runs{' ~ H ~ '}' ~ ri ~ '))', "legend": "launchd runs changes"}], 16, 65, w=8, unit="short", min=0, decimals=0, draw="bars",
+    {{ m.ts(45, "Server restarts", [{"expr": 'sum(increase(mlx_process_restarts_total{' ~ HF ~ '}' ~ ri ~ '))', "legend": "pid changes"}, {"expr": 'max(changes(mlx_process_launchd_runs{' ~ HF ~ '}' ~ ri ~ '))', "legend": "launchd runs changes"}], 16, 65, w=8, unit="short", min=0, decimals=0, draw="bars",
         desc="Observed pid changes of the server process, and changes of launchd's run count when mlx_launchagent_label is set.", no_value="No LLM telemetry") }},
-    {{ m.ts(46, "Health check failures", [{"expr": 'sum by (check) (increase(mlx_health_check_failures_total{' ~ H ~ '}' ~ ri ~ '))', "legend": m.lg('check')}, {"expr": '1 - max(mlx_server_up{' ~ H ~ '})', "legend": "/health down (1)"}], 0, 73, w=8, unit="short", min=0,
+    {{ m.ts(46, "Health check failures", [{"expr": 'sum by (check) (increase(mlx_health_check_failures_total{' ~ HF ~ '}' ~ ri ~ '))', "legend": m.lg('check')}, {"expr": '1 - max(mlx_server_up{' ~ HF ~ '})', "legend": "/health down (1)"}], 0, 73, w=8, unit="short", min=0,
         desc="Failed checks per interval: http = /health, models = /v1/models, inference = optional probe.", no_value="No LLM telemetry") }},
-    {{ m.ts(47, "Memory pressure during inference", [{"expr": 'max(macos_memory_pressure_level{' ~ H ~ '})', "legend": "pressure level"}, {"expr": 'sum(mlx_requests_active{' ~ H ~ '})', "legend": "active requests"}], 8, 73, w=8, unit="short", min=0, decimals=0,
+    {{ m.ts(47, "Memory pressure during inference", [{"expr": 'max(macos_memory_pressure_level{' ~ H ~ '})', "legend": "pressure level"}, {"expr": 'sum(mlx_requests_active{' ~ HF ~ '})', "legend": "active requests"}], 8, 73, w=8, unit="short", min=0, decimals=0,
         desc="Pressure level (0-2) against requests in flight.", no_value="No LLM telemetry") }},
-    {{ m.ts(48, "Memory, process footprint and latency", [{"expr": mem_used_pct, "legend": "system memory used %"}, {"expr": 'max(mlx_process_memory_footprint_bytes{' ~ H ~ '})', "legend": "server footprint"}, {"expr": hq(0.95, 'mlx_request_duration_seconds'), "legend": "request p95"}], 16, 73, w=8, unit="percent", min=0,
+    {{ m.ts(48, "Memory, process footprint and latency", [{"expr": mem_used_pct, "legend": "system memory used %"}, {"expr": 'max(mlx_process_memory_footprint_bytes{' ~ HF ~ '})', "legend": "server footprint"}, {"expr": hq(0.95, 'mlx_request_duration_seconds'), "legend": "request p95"}], 16, 73, w=8, unit="percent", min=0,
         desc="Correlate memory growth with request latency on one time axis.", no_value="No LLM telemetry",
         overrides=[{"matcher": {"id": "byName", "options": "server footprint"}, "properties": [{"id": "unit", "value": "bytes"}, {"id": "custom.axisPlacement", "value": "right"}]},
                    {"matcher": {"id": "byName", "options": "request p95"}, "properties": [{"id": "unit", "value": "s"}, {"id": "custom.axisPlacement", "value": "right"}]}]) }},
 
-    {{ m.row(49, "Framework and KV cache (OMLX)", 81) }},
+    {{ m.row(49, "Framework and KV cache", 81) }},
     {{ m.stat(50, "Framework", 'max by (framework) ((mlx_framework_info{' ~ H ~ '} and (time() - timestamp(mlx_framework_info{' ~ H ~ '})) < 90))', 0, 82, w=3, legend=m.lg('framework'), text_mode="name", color_mode="none",
         desc="mlx-lm or mlx-vlm; unknown = neither answers on mlx_server_port and no server process was found.", no_value="No LLM telemetry") }},
     {{ m.stat(51, "Detected from", 'max by (source) ((mlx_framework_info{' ~ H ~ '} and (time() - timestamp(mlx_framework_info{' ~ H ~ '})) < 90))', 3, 82, w=3, legend=m.lg('source'), text_mode="name", color_mode="none",
@@ -153,6 +154,24 @@ histogram_quantile({{ quantile }}, sum by (le) (rate({{ metric }}_bucket{ {{- F 
     {{ m.kv_stats(52, 6, 82, H, w=3) }},
     {{ m.ts(58, "Non-streaming request latency", [{"expr": 'histogram_quantile(0.5, sum by (le) (rate(mlx_request_duration_seconds_bucket{' ~ F ~ ', stream="false", outcome="success"}' ~ ri ~ ')))', "legend": "p50"}, {"expr": 'histogram_quantile(0.95, sum by (le) (rate(mlx_request_duration_seconds_bucket{' ~ F ~ ', stream="false", outcome="success"}' ~ ri ~ ')))', "legend": "p95"}, {"expr": 'histogram_quantile(0.5, sum by (le) (rate(mlx_server_reported_prompt_duration_seconds_bucket{' ~ F ~ ', stream="false"}' ~ ri ~ ')))', "legend": "server-reported prompt time p50"}], 0, 86, w=6, unit="s", min=0,
         desc="Successful non-streaming requests, start to complete response (whole-request latency, not TTFT). The server-reported prompt time comes from MLX-VLM timings; MLX-LM sends none.", no_value="No non-streaming requests") }},
-    {{ m.kv_timeseries(59, 6, 86, H, w=6) }}
+    {{ m.kv_timeseries(59, 6, 86, H, w=6) }},
+
+    {{ m.row(62, "Server details", 94) }},
+    {{ m.stat(63, "Model API", 'max(mlx_models_api_up{' ~ HF ~ '})', 0, 95, w=4, mappings=m.up_down, spec=[["red", None], ["green", 1]], color_mode="background",
+        desc="Last /v1/models check (every llm_models_check_interval).", no_value="No LLM telemetry") }},
+    {{ m.stat(64, "Server uptime", 'max(mlx_process_uptime_seconds{' ~ HF ~ '})', 4, 95, w=4, unit="dtdurations",
+        desc="Time since the server process started (ps etime).", no_value="Process not found") }},
+    {{ m.stat(65, "Server restarts (1h)", 'sum(increase(mlx_process_restarts_total{' ~ HF ~ '}[1h]))', 8, 95, w=4, decimals=0, spec=[["green", None], ["orange", 1]],
+        desc="Observed server pid changes in the last hour.", no_value="No LLM telemetry") }},
+    {{ m.stat(66, "Server CPU", 'max(mlx_process_cpu_utilization_percent{' ~ HF ~ '})', 12, 95, w=4, unit="percent", decimals=0,
+        desc="ps %cpu of the server process (100 = one core).", no_value="Process not found") }},
+    {{ m.stat(67, "Inference probe", 'max(mlx_inference_probe_success{' ~ HF ~ '})', 16, 95, w=4, mappings=m.up_down, spec=[["red", None], ["green", 1]], color_mode="background",
+        desc="Last one-token probe (llm_inference_probe_enabled; /v1/completions on MLX-LM, chat with the served model on MLX-VLM).", no_value="Probe disabled") }},
+    {{ m.stat(68, "Server processes", 'max by (framework) (mlx_framework_processes{' ~ H ~ '})', 20, 95, w=4, legend=m.lg('framework'), text_mode="value_and_name", decimals=0,
+        desc="MLX-LM and MLX-VLM server processes on this node. Both > 0 means both frameworks genuinely run; the agent measures the one on mlx_server_port.", no_value="No LLM telemetry") }},
+    {{ m.ts(69, "Request duration percentiles", [{"expr": hq(0.5, 'mlx_request_duration_seconds'), "legend": "p50"}, {"expr": hq(0.9, 'mlx_request_duration_seconds'), "legend": "p90"}, {"expr": hq(0.95, 'mlx_request_duration_seconds'), "legend": "p95"}, {"expr": hq(0.99, 'mlx_request_duration_seconds'), "legend": "p99"}], 0, 99, w=12, unit="s", min=0,
+        desc="End-to-end request duration through the proxy, all requests, from histogram buckets.", no_value="No proxy telemetry") }},
+    {{ m.ts(70, "Health check duration", [{"expr": 'max by (check) (mlx_health_check_duration_seconds{' ~ HF ~ '})', "legend": m.lg('check')}], 12, 99, w=12, unit="s", min=0,
+        desc="Duration of the last check: http = /health, models = /v1/models, inference = optional probe.", no_value="No LLM telemetry") }}
   ]
 }

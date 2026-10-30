@@ -52,6 +52,11 @@ llm_framework: auto
 # those endpoints with 401. Client requests through the proxy keep their own
 # Authorization header and never use this key.
 llm_server_api_key_file: ""
+# MLX-VLM's own KV (prefix) cache, GET /v1/cache/stats on the same server,
+# polled every llm_models_check_interval while the node runs MLX-VLM. Its
+# cache is off unless the server runs with APC_ENABLED=1; it is then reported
+# as disabled, not as zeros. MLX-LM has no such endpoint.
+llm_vlm_cache_stats_enabled: true
 # Local model directory, used only to read config.json for the maximum context
 # length. Leave empty for Hugging Face repositories (the HF cache is searched)
 # or when llm_model_max_context_tokens is set.

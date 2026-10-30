@@ -4,9 +4,10 @@
     definitions: docs/LLM_OBSERVABILITY.md. -#}
 {% import 'llm_dashboard_macros.j2' as m %}
 {% set H = 'host_name=~"$host"' %}
+{% set HF = H ~ ', framework=~"$framework"' %}
 {% set F = 'host_name=~"$host", model=~"$model", framework=~"$framework"' %}
-{% set proxy0 = ' or on() (0 * sum(mlx_telemetry_info{' ~ H ~ ', proxy="enabled"}))' %}
-{% set quality0 = ' or on() (0 * sum(mlx_telemetry_info{' ~ H ~ ', quality="enabled"}))' %}
+{% set proxy0 = ' or on() (0 * sum(mlx_telemetry_info{' ~ HF ~ ', proxy="enabled"}))' %}
+{% set quality0 = ' or on() (0 * sum(mlx_telemetry_info{' ~ HF ~ ', quality="enabled"}))' %}
 {% set ri = '[$__rate_interval]' %}
 {%- macro hq(quantile, metric, window='[$__rate_interval]') -%}
 histogram_quantile({{ quantile }}, sum by (le) (rate({{ metric }}_bucket{ {{- F -}} }{{ window }})))
@@ -56,15 +57,15 @@ histogram_quantile({{ quantile }}, sum by (le) (rate({{ metric }}_bucket{ {{- F 
         desc="From MLX-LM usage blocks.", no_value="No proxy telemetry") }},
     {{ m.ts(5, "Completion tokens/s per request", [{"expr": hq(0.5, 'mlx_completion_tokens_per_second'), "legend": "p50"}, {"expr": hq(0.95, 'mlx_completion_tokens_per_second'), "legend": "p95"}], 0, 9, w=8, unit="short", min=0,
         desc="(completion_tokens - 1) / generation duration, streaming requests with usage. Quantiles from histogram buckets.", no_value="No streaming requests") }},
-    {{ m.ts(6, "Streaming time to first token", [{"expr": hq(0.5, 'mlx_time_to_first_token_seconds'), "legend": "p50"}, {"expr": hq(0.95, 'mlx_time_to_first_token_seconds'), "legend": "p95"}], 8, 9, w=8, unit="s", min=0,
+    {{ m.ts(6, "Streaming time to first token", [{"expr": hq(0.5, 'mlx_time_to_first_token_seconds'), "legend": "p50"}, {"expr": hq(0.95, 'mlx_time_to_first_token_seconds'), "legend": "p95"}, {"expr": hq(0.9, 'mlx_time_to_first_token_seconds'), "legend": "p90"}, {"expr": hq(0.99, 'mlx_time_to_first_token_seconds'), "legend": "p99"}], 8, 9, w=8, unit="s", min=0,
         desc="Streaming only: request start to the first SSE event with content, reasoning or a tool call.", no_value="No streaming requests") }},
     {{ m.ts(7, "Generation duration", [{"expr": hq(0.5, 'mlx_generation_duration_seconds'), "legend": "p50"}, {"expr": hq(0.95, 'mlx_generation_duration_seconds'), "legend": "p95"}], 16, 9, w=8, unit="s", min=0,
         desc="Streaming only: first generated content to end of stream.", no_value="No streaming requests") }},
-    {{ m.ts(8, "End-to-end request duration", [{"expr": hq(0.5, 'mlx_request_duration_seconds'), "legend": "p50"}, {"expr": hq(0.95, 'mlx_request_duration_seconds'), "legend": "p95"}, {"expr": hq(0.99, 'mlx_request_duration_seconds'), "legend": "p99"}], 0, 17, w=8, unit="s", min=0,
+    {{ m.ts(8, "End-to-end request duration", [{"expr": hq(0.5, 'mlx_request_duration_seconds'), "legend": "p50"}, {"expr": hq(0.95, 'mlx_request_duration_seconds'), "legend": "p95"}, {"expr": hq(0.99, 'mlx_request_duration_seconds'), "legend": "p99"}, {"expr": hq(0.9, 'mlx_request_duration_seconds'), "legend": "p90"}], 0, 17, w=8, unit="s", min=0,
         desc="Proxy receives the request to last byte relayed, streaming and non-streaming together. Non-streaming latency on its own is in the Frameworks section below.", no_value="No proxy telemetry") }},
     {{ m.ts(9, "Request error rate", [{"expr": '100 * sum(rate(mlx_requests_total{' ~ F ~ ', outcome!="success"}' ~ ri ~ ')) / (sum(rate(mlx_requests_total{' ~ F ~ '}' ~ ri ~ ')) > 0)', "legend": "error %"}], 8, 17, w=8, unit="percent", min=0,
         desc="Share of requests with an outcome other than success.", no_value="No proxy telemetry") }},
-    {{ m.ts(10, "Active requests", [{"expr": 'sum by (host_name) (mlx_requests_active{' ~ H ~ '})', "legend": m.lg('host_name')}], 16, 17, w=8, unit="short", decimals=0, min=0,
+    {{ m.ts(10, "Active requests", [{"expr": 'sum by (host_name) (mlx_requests_active{' ~ HF ~ '})', "legend": m.lg('host_name')}], 16, 17, w=8, unit="short", decimals=0, min=0,
         desc="Requests in flight through the proxy.", no_value="No proxy telemetry") }},
 
     {{ m.row(11, "Context and KV cache", 25) }},
@@ -76,7 +77,7 @@ histogram_quantile({{ quantile }}, sum by (le) (rate({{ metric }}_bucket{ {{- F 
         desc="max_position_embeddings from the model's config.json, or llm_model_max_context_tokens.", no_value="Unknown") }},
     {{ m.stat(15, "Prompt cache reuse (1h)", '100 * sum(increase(mlx_tokens_prompt_cached_total{' ~ F ~ '}[1h])) / (sum(increase(mlx_tokens_prompt_total{' ~ F ~ '}[1h])) > 0)', 20, 26, w=4, h=4, unit="percent", decimals=1,
         desc="Share of prompt tokens served from MLX-LM's prompt cache (usage.prompt_tokens_details.cached_tokens). Measured by MLX-LM; it is cache reuse, not KV-cache size.", no_value="No usage reported") }},
-    {{ m.text(16, "KV-cache size, utilisation, sequences, evictions", "**Not exposed by mlx_lm.server or mlx_vlm.server through this deployment.** MLX-LM 0.32.2 reports no KV-cache size, capacity or evictions over HTTP, and this deployment does not modify the servers, so nothing is estimated (in particular not from host memory). The prompt-cache reuse figure above is the cache signal both servers report in usage. **With OMLX** (`omlx_monitoring_enabled`), its KV cache is in the *KV cache (OMLX)* section at the bottom.", 16, 30, w=8, h=4) }},
+    {{ m.text(16, "KV-cache size, utilisation, sequences, evictions", "**MLX-LM: not exposed.** MLX-LM 0.32.2 reports no KV-cache size, capacity or evictions over HTTP, and this deployment does not modify the servers, so nothing is estimated (in particular not from host memory). The prompt-cache reuse figure above is the cache signal both servers report in usage. **MLX-VLM's prefix cache** (when the server runs with `APC_ENABLED=1`) and **OMLX** (`omlx_monitoring_enabled`) report their KV cache in the *KV cache* section at the bottom.", 16, 30, w=8, h=4) }},
 
     {{ m.row(17, "Quality and hallucination-risk heuristics", 34) }},
     {{ m.text(18, "How to read this section", "Optional (`llm_quality_metrics_enabled`, off by default). Each successful response of at least 20 words is scored **in memory** by three text heuristics and then discarded; nothing is stored or logged. **These are heuristics, not a hallucination or fact-checking detector**:\n\n- *repetition* = share of repeated word trigrams (flag at >= `llm_quality_repetition_threshold`, default 0.3)\n- *hedging* = hedge phrases per 100 words (flag at >= `llm_quality_hedging_threshold`, default 2)\n- *refusal* = a refusal phrase is present\n- *heuristic risk score* = 0.5 x min(1, repetition/threshold) + 0.3 x min(1, hedging/threshold) + 0.2 x refusal (weights configurable)\n\nGroundedness is **not evaluated**: no reference source or evaluator is configured.", 0, 35, w=24, h=6) }},
@@ -101,7 +102,7 @@ histogram_quantile({{ quantile }}, sum by (le) (rate({{ metric }}_bucket{ {{- F 
         desc="Requests through the telemetry proxy by the framework detected on each node (mlx-lm, mlx-vlm, unknown).", no_value="No proxy telemetry") }},
     {{ m.ts(29, "Streaming TTFT p95 by framework", [{"expr": 'histogram_quantile(0.95, sum by (le, framework) (rate(mlx_time_to_first_token_seconds_bucket{' ~ F ~ '}' ~ ri ~ ')))', "legend": m.lg('framework')}], 8, 54, w=8, unit="s", min=0,
         desc="Streaming requests only: request start to the first SSE event with generated content. Non-streaming requests have no TTFT.", no_value="No streaming requests") }},
-    {{ m.ts(30, "Non-streaming request latency", [{"expr": 'histogram_quantile(0.5, sum by (le) (rate(mlx_request_duration_seconds_bucket{' ~ F ~ ', stream="false", outcome="success"}' ~ ri ~ ')))', "legend": "p50"}, {"expr": 'histogram_quantile(0.95, sum by (le) (rate(mlx_request_duration_seconds_bucket{' ~ F ~ ', stream="false", outcome="success"}' ~ ri ~ ')))', "legend": "p95"}], 16, 54, w=8, unit="s", min=0,
+    {{ m.ts(30, "Non-streaming request latency", [{"expr": 'histogram_quantile(0.5, sum by (le) (rate(mlx_request_duration_seconds_bucket{' ~ F ~ ', stream="false", outcome="success"}' ~ ri ~ ')))', "legend": "p50"}, {"expr": 'histogram_quantile(0.95, sum by (le) (rate(mlx_request_duration_seconds_bucket{' ~ F ~ ', stream="false", outcome="success"}' ~ ri ~ ')))', "legend": "p95"}, {"expr": 'histogram_quantile(0.9, sum by (le) (rate(mlx_request_duration_seconds_bucket{' ~ F ~ ', stream="false", outcome="success"}' ~ ri ~ ')))', "legend": "p90"}, {"expr": 'histogram_quantile(0.99, sum by (le) (rate(mlx_request_duration_seconds_bucket{' ~ F ~ ', stream="false", outcome="success"}' ~ ri ~ ')))', "legend": "p99"}], 16, 54, w=8, unit="s", min=0,
         desc="Successful non-streaming requests, request start to the complete response. The proxy only sees a non-streaming response once generation is finished, so this is whole-request latency, not time to first token.", no_value="No non-streaming requests") }},
     {{ m.ts(31, "Completion tokens/s p50 by framework", [{"expr": 'histogram_quantile(0.5, sum by (le, framework) (rate(mlx_completion_tokens_per_second_bucket{' ~ F ~ '}' ~ ri ~ ')))', "legend": m.lg('framework')}], 0, 62, w=8, unit="short", min=0,
         desc="Proxy-measured decode rate of streaming requests with usage, (completion_tokens - 1) / generation duration.", no_value="No streaming requests") }},
@@ -110,11 +111,25 @@ histogram_quantile({{ quantile }}, sum by (le) (rate({{ metric }}_bucket{ {{- F 
     {{ m.ts(33, "Server-reported prompt processing time", [{"expr": 'histogram_quantile(0.5, sum by (le, stream) (rate(mlx_server_reported_prompt_duration_seconds_bucket{' ~ F ~ '}' ~ ri ~ ')))', "legend": "p50 stream=" ~ m.lg('stream')}, {"expr": 'histogram_quantile(0.95, sum by (le, stream) (rate(mlx_server_reported_prompt_duration_seconds_bucket{' ~ F ~ '}' ~ ri ~ ')))', "legend": "p95 stream=" ~ m.lg('stream')}], 16, 62, w=8, unit="s", min=0,
         desc="timings.prompt_ms as the server reports it: its own prefill time, derived by the server from its prompt rate. Not measured by the proxy and not the same as TTFT. MLX-VLM only.", no_value="Server reports no timings (MLX-LM)") }},
 
-    {{ m.row(34, "KV cache (OMLX)", 70) }},
+    {{ m.row(34, "KV cache (MLX-VLM prefix cache, OMLX)", 70) }},
     {{ m.kv_stats(35, 0, 71, H) }},
     {{ m.kv_timeseries(41, 0, 75, H) }},
-    {{ m.availability(44, "Allocated vs used", "allocated", "Unavailable by design: OMLX reports how much KV cache each tier holds and its budget, not a separate allocated figure. The hot tier's size is the memory it holds.", 0, 83, w=6, h=3, series="omlx_kv_cache_metric_available", no_value="OMLX monitoring off") }},
-    {{ m.availability(45, "Hit / miss counters", "lookups", "Whether OMLX reports KV-block lookup hits and misses on all selected nodes.", 6, 83, w=6, h=3, series="omlx_kv_cache_metric_available", no_value="OMLX monitoring off") }},
-    {{ m.text(46, "What the KV cache section shows", "Read from OMLX's `GET /admin/api/stats` (`runtime_cache`) on Macs with `omlx_monitoring_enabled`. **hot** = OMLX's in-memory KV tier, **ssd** = its paged on-disk tier; capacities are OMLX's process-wide budgets; utilisation is computed only when a capacity is reported. Hit ratio and evictions are OMLX's own counters since it started. Empty panels mean OMLX monitoring is off or OMLX did not report that figure; nothing is estimated.", 12, 83, w=12, h=3) }}
+    {{ m.availability(44, "Allocated vs used", "allocated", "Unavailable by design: neither MLX-VLM nor OMLX reports an allocated figure separate from what each tier holds and its budget.", 0, 83, w=6, h=3, series="mlx_kv_cache_metric_available", no_value="No KV-cache source") }},
+    {{ m.availability(45, "Hit / miss counters", "lookups", "Whether every KV-cache source on the selected nodes reports lookup hits and misses.", 6, 83, w=6, h=3, series="mlx_kv_cache_metric_available", no_value="No KV-cache source") }},
+    {{ m.text(46, "What the KV cache section shows", "`source=mlx-vlm`: MLX-VLM's prefix cache, `GET /v1/cache/stats` on MLX-VLM nodes (off unless the server runs with `APC_ENABLED=1`). `source=omlx`: OMLX's `GET /admin/api/stats` with `omlx_monitoring_enabled`. **hot** = in-memory tier, **ssd** = on-disk tier; utilisation only where a capacity is reported. Hit ratio and evictions are the sources' own counters. **MLX-LM exposes no KV-cache stats.** Empty panels mean no source reports that figure; nothing is estimated.", 12, 83, w=12, h=3) }},
+
+    {{ m.row(47, "Framework comparison", 86) }},
+    {{ m.ts(48, "Request duration p95 by framework", [{"expr": 'histogram_quantile(0.95, sum by (le, framework) (rate(mlx_request_duration_seconds_bucket{' ~ F ~ '}' ~ ri ~ ')))', "legend": m.lg('framework') ~ " all"}, {"expr": 'histogram_quantile(0.95, sum by (le, framework) (rate(mlx_request_duration_seconds_bucket{' ~ F ~ ', stream="false", outcome="success"}' ~ ri ~ ')))', "legend": m.lg('framework') ~ " non-streaming"}], 0, 87, w=8, unit="s", min=0,
+        desc="End-to-end duration p95 per framework, all requests and successful non-streaming requests. Streaming TTFT by framework is in the Frameworks section above.", no_value="No proxy telemetry") }},
+    {{ m.ts(49, "Tokens per minute by framework", [{"expr": 'sum by (framework) (rate(mlx_tokens_prompt_total{' ~ F ~ '}' ~ ri ~ ')) * 60', "legend": m.lg('framework') ~ " prompt"}, {"expr": 'sum by (framework) (rate(mlx_tokens_completion_total{' ~ F ~ '}' ~ ri ~ ')) * 60', "legend": m.lg('framework') ~ " completion"}, {"expr": 'sum by (framework) (rate(mlx_tokens_prompt_cached_total{' ~ F ~ '}' ~ ri ~ ')) * 60', "legend": m.lg('framework') ~ " prompt from cache"}], 8, 87, w=8, unit="short", min=0,
+        desc="From the servers' usage blocks. Cached = usage.prompt_tokens_details.cached_tokens (both frameworks report it).", no_value="No usage reported") }},
+    {{ m.ts(50, "Requests without token usage by framework", [{"expr": 'sum by (framework, stream) (increase(mlx_requests_usage_missing_total{' ~ F ~ '}' ~ ri ~ '))', "legend": m.lg('framework') ~ " stream=" ~ m.lg('stream')}], 16, 87, w=8, unit="short", min=0, draw="bars",
+        desc="Successful requests whose response carried no usage block. Their tokens are not counted or estimated.", no_value="No proxy telemetry") }},
+    {{ m.ts(51, "Error rate by framework", [{"expr": '100 * sum by (framework) (rate(mlx_requests_total{' ~ F ~ ', outcome!="success"}' ~ ri ~ ')) / (sum by (framework) (rate(mlx_requests_total{' ~ F ~ '}' ~ ri ~ ')) > 0)', "legend": m.lg('framework')}], 0, 95, w=8, unit="percent", min=0,
+        desc="Share of requests per framework with an outcome other than success.", no_value="No proxy telemetry") }},
+    {{ m.ts(52, "Generation duration p95 by framework", [{"expr": 'histogram_quantile(0.95, sum by (le, framework) (rate(mlx_generation_duration_seconds_bucket{' ~ F ~ '}' ~ ri ~ ')))', "legend": m.lg('framework')}], 8, 95, w=8, unit="s", min=0,
+        desc="Streaming requests: first generated content to end of stream.", no_value="No streaming requests") }},
+    {{ m.ts(53, "Heuristic risk p95 by framework", [{"expr": 'histogram_quantile(0.95, sum by (le, framework) (rate(mlx_quality_heuristic_risk_score_bucket{' ~ F ~ '}' ~ ri ~ ')))', "legend": m.lg('framework')}], 16, 95, w=8, unit="short", min=0, max=1,
+        desc="Optional text heuristics (llm_quality_metrics_enabled), computed the same way for both frameworks' text output. Not a hallucination detector.", no_value="Heuristics disabled") }}
   ]
 }

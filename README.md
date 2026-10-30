@@ -225,7 +225,7 @@ Macs that serve models with `mlx_lm.server` or `mlx_vlm.server` can also report 
 
 It exports over OTLP to a new loopback receiver on the existing collector, so the metrics reach VictoriaMetrics with the host's other metrics. The monitoring Mac provisions three dashboards (LLM Cluster Overview, LLM Node Detail, and LLM Performance, KV Cache and Quality) and 10 alert rules. Requests are measured only when clients use the proxy port (`mlx_telemetry_port`, 18080) instead of the server's own port.
 
-On Macs that run OMLX, `omlx_monitoring_enabled` adds its KV-cache figures (hot and SSD tier used and capacity, utilisation, hit ratio, evictions). Without OMLX, KV-cache size and occupancy are reported as unavailable, as are GPU frequency and power; none of them is estimated.
+KV-cache figures (used and capacity per tier, utilisation, hit ratio, evictions) come from MLX-VLM's prefix cache when its server runs with `APC_ENABLED=1`, and from OMLX with `omlx_monitoring_enabled`. MLX-LM exposes none, so they are reported as unavailable there, as are GPU frequency and power; none of them is estimated.
 
 See [docs/LLM_OBSERVABILITY.md](docs/LLM_OBSERVABILITY.md) for setup, variables, metric definitions, limitations, verification and rollback.
 

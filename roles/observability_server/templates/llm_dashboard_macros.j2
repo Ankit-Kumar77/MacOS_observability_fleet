@@ -95,30 +95,39 @@
 }
 {%- endmacro %}
 
-{#- Panels shared by the dashboards' "Frameworks and KV cache" sections. H
-    filters hosts, F hosts + model + framework. OMLX series carry OMLX's own
-    model ids, which differ from the proxy's model label, so they take H. -#}
+{#- Panels shared by the dashboards' KV-cache sections. Sources (label
+    source): "mlx-vlm" = MLX-VLM's prefix cache (/v1/cache/stats, polled on
+    MLX-VLM nodes), "omlx" = OMLX (/admin/api/stats, omlx_monitoring_enabled).
+    H filters hosts. KV series carry the source's model ids, not the proxy's
+    model label, so they take H only. -#}
+{% set kv_state_map = [{"type": "value", "options": {"2": {"text": "Enabled", "color": "green"}, "1": {"text": "Disabled on server", "color": "text"}, "-1": {"text": "Poll failing", "color": "red"}}}] %}
 {%- macro kv_stats(first_id, x, y, H, w=4, h=4) -%}
-{{ stat(first_id, "OMLX KV stats", 'min(omlx_up{' ~ H ~ '})', x, y, w=w, h=h, mappings=up_down, spec=[["red", None], ["green", 1]], color_mode="background",
-        desc="Whether the last poll of OMLX's /admin/api/stats succeeded on every selected node with OMLX monitoring on (omlx_monitoring_enabled). Down: OMLX not running, wrong omlx_url, or its API key missing or rotated (omlx_scrape_failures_total{reason}).", no_value="OMLX monitoring off") }},
-{{ stat(first_id + 1, "Hot KV cache used", 'sum(omlx_kv_cache_used_bytes{tier="hot", ' ~ H ~ '})', x + w, y, w=w, h=h, unit="bytes", decimals=1,
-        desc="In-memory (hot tier) KV cache OMLX holds, summed over models and selected nodes.", no_value="Not reported") }},
-{{ stat(first_id + 2, "Hot KV cache capacity", 'sum(omlx_kv_cache_capacity_bytes{tier="hot", ' ~ H ~ '})', x + 2 * w, y, w=w, h=h, unit="bytes", decimals=1,
-        desc="Hot tier budget (OMLX --hot-cache-max-size), summed over selected nodes. Not reported when the hot tier is off.", no_value="Not reported") }},
-{{ stat(first_id + 3, "Hot KV cache utilisation", 'max(omlx_kv_cache_utilization_percent{tier="hot", ' ~ H ~ '})', x + 3 * w, y, w=w, h=h, unit="percent", decimals=1, spec=[["green", None], ["orange", 80], ["red", 95]],
-        desc="Hot tier used / capacity, highest across selected nodes. Only computed when OMLX reports a capacity.", no_value="Not reported") }},
-{{ stat(first_id + 4, "SSD KV cache used", 'sum(omlx_kv_cache_used_bytes{tier="ssd", ' ~ H ~ '})', x + 4 * w, y, w=w, h=h, unit="bytes", decimals=1,
-        desc="KV cache blocks OMLX keeps on disk (paged SSD tier), summed over models and selected nodes.", no_value="Not reported") }},
-{{ stat(first_id + 5, "SSD KV cache utilisation", 'max(omlx_kv_cache_utilization_percent{tier="ssd", ' ~ H ~ '})', x + 5 * w, y, w=w, h=h, unit="percent", decimals=1, spec=[["green", None], ["orange", 80], ["red", 95]],
-        desc="SSD tier used / its size limit, highest across selected nodes.", no_value="Not reported") }}
+{{ stat(first_id, "KV cache", 'min(2 * mlx_kv_cache_source_up{' ~ H ~ '} - 1 + (mlx_kv_cache_enabled{' ~ H ~ '} or on (host_name, source) 0 * mlx_kv_cache_source_up{' ~ H ~ '}))', x, y, w=w, h=h, mappings=kv_state_map, spec=[["text", None]], color_mode="background",
+        desc="Worst state across selected nodes and sources. Enabled = the source reports its KV cache. Disabled on server = MLX-VLM runs without its prefix cache (APC_ENABLED=1 turns it on). Poll failing = MLX-VLM /v1/cache/stats or OMLX /admin/api/stats did not answer, or rejected the API key (mlx_kv_cache_scrape_failures_total{source, reason}). MLX-LM exposes no KV-cache stats.", no_value="No KV-cache source") }},
+{{ stat(first_id + 1, "Hot KV cache used", 'sum(mlx_kv_cache_used_bytes{tier="hot", ' ~ H ~ '})', x + w, y, w=w, h=h, unit="bytes", decimals=1,
+        desc="In-memory KV cache held, summed over sources, models and selected nodes. MLX-VLM: prefix-cache resident bytes; OMLX: hot tier size.", no_value="Not reported") }},
+{{ stat(first_id + 2, "Hot KV cache capacity", 'sum(mlx_kv_cache_capacity_bytes{tier="hot", ' ~ H ~ '})', x + 2 * w, y, w=w, h=h, unit="bytes", decimals=1,
+        desc="In-memory KV budget, summed over selected nodes. MLX-VLM: APC resident budget; OMLX: --hot-cache-max-size. Not reported when no budget is set.", no_value="Not reported") }},
+{{ stat(first_id + 3, "Hot KV cache utilisation", 'max(mlx_kv_cache_utilization_percent{tier="hot", ' ~ H ~ '})', x + 3 * w, y, w=w, h=h, unit="percent", decimals=1, spec=[["green", None], ["orange", 80], ["red", 95]],
+        desc="Hot tier used / capacity, highest across selected nodes and sources. Only computed when a capacity is reported.", no_value="Not reported") }},
+{{ stat(first_id + 4, "SSD KV cache used", 'sum(mlx_kv_cache_used_bytes{tier="ssd", ' ~ H ~ '})', x + 4 * w, y, w=w, h=h, unit="bytes", decimals=1,
+        desc="KV cache kept on disk (MLX-VLM APC disk tier, OMLX paged SSD tier), summed over selected nodes.", no_value="Not reported") }},
+{{ stat(first_id + 5, "SSD KV cache utilisation", 'max(mlx_kv_cache_utilization_percent{tier="ssd", ' ~ H ~ '})', x + 5 * w, y, w=w, h=h, unit="percent", decimals=1, spec=[["green", None], ["orange", 80], ["red", 95]],
+        desc="SSD tier used / its size limit, highest across selected nodes. Not reported for an uncapped disk tier.", no_value="Not reported") }}
 {%- endmacro %}
 
-{%- macro kv_timeseries(first_id, x, y, H, w=8, h=8, by='tier') -%}
-{{ ts(first_id, "KV cache used vs capacity", [{"expr": 'sum by (' ~ by ~ ') (omlx_kv_cache_used_bytes{' ~ H ~ '})', "legend": lg(by) ~ " used"}, {"expr": 'sum by (tier) (omlx_kv_cache_capacity_bytes{' ~ H ~ '})', "legend": lg('tier') ~ " capacity"}], x, y, w=w, h=h, unit="bytes", min=0,
-      desc="OMLX KV cache per tier: hot = memory, ssd = disk. There is no separate 'allocated' figure: the hot tier's size is the memory it holds.", no_value="OMLX monitoring off or not reported") }},
-{{ ts(first_id + 1, "KV cache utilisation", [{"expr": 'max by (host_name, tier) (omlx_kv_cache_utilization_percent{' ~ H ~ '})', "legend": lg('host_name') ~ " " ~ lg('tier')}], x + w, y, w=w, h=h, unit="percent", min=0, max=100,
-      desc="Used / capacity per node and tier, computed by the telemetry agent from OMLX's figures.", no_value="OMLX monitoring off or not reported") }},
-{{ ts(first_id + 2, "KV cache block hit ratio and evictions", [{"expr": '100 * sum(rate(omlx_kv_cache_lookups_total{result="hit", ' ~ H ~ '}[$__rate_interval])) / (sum(rate(omlx_kv_cache_lookups_total{' ~ H ~ '}[$__rate_interval])) > 0)', "legend": "block hit %"}, {"expr": 'sum by (tier) (rate(omlx_kv_cache_evictions_total{' ~ H ~ '}[$__rate_interval])) * 60', "legend": "evictions/min " ~ lg('tier')}], x + 2 * w, y, w=w, h=h, unit="percent", min=0,
-      desc="Share of KV-block lookups OMLX served from its cache (hot or SSD tier), and blocks evicted per minute. OMLX's own counters, reset when OMLX restarts.", no_value="No lookups or OMLX monitoring off",
+{%- macro kv_timeseries(first_id, x, y, H, w=8, h=8) -%}
+{{ ts(first_id, "KV cache used vs capacity", [{"expr": 'sum by (source, tier) (mlx_kv_cache_used_bytes{' ~ H ~ '})', "legend": lg('source') ~ " " ~ lg('tier') ~ " used"}, {"expr": 'sum by (source, tier) (mlx_kv_cache_capacity_bytes{' ~ H ~ '})', "legend": lg('source') ~ " " ~ lg('tier') ~ " capacity"}], x, y, w=w, h=h, unit="bytes", min=0,
+      desc="KV cache per source and tier: hot = memory, ssd = disk. Neither source reports a separate 'allocated' figure: the hot tier's size is the memory it holds.", no_value="No KV-cache source reporting") }},
+{{ ts(first_id + 1, "KV cache utilisation", [{"expr": 'max by (host_name, source, tier) (mlx_kv_cache_utilization_percent{' ~ H ~ '})', "legend": lg('host_name') ~ " " ~ lg('source') ~ " " ~ lg('tier')}, {"expr": 'max by (host_name, source) (100 * mlx_kv_cache_entries{tier="hot", ' ~ H ~ '} / on (host_name, source, tier) group_left max by (host_name, source, tier) (mlx_kv_cache_entries_capacity{tier="hot", ' ~ H ~ '}))', "legend": lg('host_name') ~ " " ~ lg('source') ~ " block pool"}], x + w, y, w=w, h=h, unit="percent", min=0, max=100,
+      desc="Used / capacity per node, source and tier, and (MLX-VLM) prefix-cache blocks in use / block pool size. Computed by the telemetry agent from the source's own figures.", no_value="No KV-cache source reporting") }},
+{{ ts(first_id + 2, "KV cache hit ratio and evictions", [{"expr": '100 * sum by (source) (rate(mlx_kv_cache_lookups_total{result="hit", ' ~ H ~ '}[$__rate_interval])) / (sum by (source) (rate(mlx_kv_cache_lookups_total{' ~ H ~ '}[$__rate_interval])) > 0)', "legend": "hit % " ~ lg('source')}, {"expr": 'sum by (source, tier) (rate(mlx_kv_cache_evictions_total{' ~ H ~ '}[$__rate_interval])) * 60', "legend": "evictions/min " ~ lg('source') ~ " " ~ lg('tier')}], x + 2 * w, y, w=w, h=h, unit="percent", min=0,
+      desc="Share of KV-cache lookups served from the cache, and blocks evicted per minute, per source. The sources' own counters, reset when the server restarts.", no_value="No lookups or no KV-cache source",
       overrides=[{"matcher": {"id": "byRegexp", "options": "evictions.*"}, "properties": [{"id": "unit", "value": "short"}, {"id": "custom.axisPlacement", "value": "right"}]}]) }}
+{%- endmacro %}
+
+{#- One node's framework, from live samples only, for joining onto host-level
+    series (CPU, memory) to compare frameworks. -#}
+{%- macro fw_join(host_filter) -%}
+ * on (host_name) group_left (framework) max by (host_name, framework) (mlx_framework_info{ {{- host_filter -}}, framework=~"$framework"} and (time() - timestamp(mlx_framework_info{ {{- host_filter -}} })) < 90)
 {%- endmacro %}

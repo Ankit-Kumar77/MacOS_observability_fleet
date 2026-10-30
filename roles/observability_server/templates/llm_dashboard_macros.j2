@@ -64,11 +64,12 @@
 }
 {%- endmacro %}
 
-{#- A hardware reading the agent reports as collected (1) or unavailable (0)
-    for every node, via macos_hardware_metric_available{metric=...}. -#}
-{%- macro availability(id, title, metric, reason, x, y, w=3, h=4, host_filter='host_name=~"$host"') -%}
-{{ stat(id, title, 'min(macos_hardware_metric_available{metric="' ~ metric ~ '", ' ~ host_filter ~ '})', x, y, w=w, h=h,
-        desc=reason, no_value="No LLM telemetry", spec=[["text", None]], text_mode="value",
+{#- A reading the agent reports as collected (1) or unavailable (0) for every
+    node: macos_hardware_metric_available{metric=...} for hardware, or
+    omlx_kv_cache_metric_available{metric=...} for the OMLX KV-cache figures. -#}
+{%- macro availability(id, title, metric, reason, x, y, w=3, h=4, host_filter='host_name=~"$host"', series='macos_hardware_metric_available', no_value="No LLM telemetry") -%}
+{{ stat(id, title, 'min(' ~ series ~ '{metric="' ~ metric ~ '", ' ~ host_filter ~ '})', x, y, w=w, h=h,
+        desc=reason, no_value=no_value, spec=[["text", None]], text_mode="value",
         mappings=[{"type": "value", "options": {"0": {"text": "Unavailable", "color": "text"}, "1": {"text": "Collected", "color": "green"}}}]) }}
 {%- endmacro %}
 
@@ -76,3 +77,48 @@
 {% set up_down = [{"type": "value", "options": {"0": {"text": "Down", "color": "red"}, "1": {"text": "Up", "color": "green"}}}] %}
 {% set pressure_map = [{"type": "value", "options": {"0": {"text": "Normal", "color": "green"}, "1": {"text": "Warning", "color": "orange"}, "2": {"text": "Critical", "color": "red"}}}] %}
 {% set thermal_map = [{"type": "value", "options": {"0": {"text": "Nominal", "color": "green"}, "1": {"text": "Fair", "color": "yellow"}, "2": {"text": "Serious", "color": "orange"}, "3": {"text": "Critical", "color": "red"}}}] %}
+
+{#- The $framework variable shared by the three LLM dashboards. mlx-lm /
+    mlx-vlm / unknown, from the agent's framework detection. Panels that show
+    a node's current framework read mlx_framework_info only from samples
+    newer than 90 s: after a framework change the old series would otherwise
+    stay in instant queries for VictoriaMetrics' 5-minute lookback. -#}
+{%- macro framework_var(host_filter) -%}
+{
+  "name": "framework", "label": "Framework", "type": "query",
+  "description": "Inference framework per node: mlx-lm or mlx-vlm (unknown = not detected). Series recorded before framework detection have no framework label and match only All.",
+  "datasource": {{ ds | tojson }},
+  "definition": {{ ('label_values(mlx_framework_info{' ~ host_filter ~ '}, framework)') | tojson }},
+  "query": {"qryType": 1, "query": {{ ('label_values(mlx_framework_info{' ~ host_filter ~ '}, framework)') | tojson }}, "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+  "refresh": 2, "regex": "", "sort": 1, "multi": true, "includeAll": true, "allValue": ".*",
+  "current": {"selected": true, "text": ["All"], "value": ["$__all"]}, "options": [], "hide": 0
+}
+{%- endmacro %}
+
+{#- Panels shared by the dashboards' "Frameworks and KV cache" sections. H
+    filters hosts, F hosts + model + framework. OMLX series carry OMLX's own
+    model ids, which differ from the proxy's model label, so they take H. -#}
+{%- macro kv_stats(first_id, x, y, H, w=4, h=4) -%}
+{{ stat(first_id, "OMLX KV stats", 'min(omlx_up{' ~ H ~ '})', x, y, w=w, h=h, mappings=up_down, spec=[["red", None], ["green", 1]], color_mode="background",
+        desc="Whether the last poll of OMLX's /admin/api/stats succeeded on every selected node with OMLX monitoring on (omlx_monitoring_enabled). Down: OMLX not running, wrong omlx_url, or its API key missing or rotated (omlx_scrape_failures_total{reason}).", no_value="OMLX monitoring off") }},
+{{ stat(first_id + 1, "Hot KV cache used", 'sum(omlx_kv_cache_used_bytes{tier="hot", ' ~ H ~ '})', x + w, y, w=w, h=h, unit="bytes", decimals=1,
+        desc="In-memory (hot tier) KV cache OMLX holds, summed over models and selected nodes.", no_value="Not reported") }},
+{{ stat(first_id + 2, "Hot KV cache capacity", 'sum(omlx_kv_cache_capacity_bytes{tier="hot", ' ~ H ~ '})', x + 2 * w, y, w=w, h=h, unit="bytes", decimals=1,
+        desc="Hot tier budget (OMLX --hot-cache-max-size), summed over selected nodes. Not reported when the hot tier is off.", no_value="Not reported") }},
+{{ stat(first_id + 3, "Hot KV cache utilisation", 'max(omlx_kv_cache_utilization_percent{tier="hot", ' ~ H ~ '})', x + 3 * w, y, w=w, h=h, unit="percent", decimals=1, spec=[["green", None], ["orange", 80], ["red", 95]],
+        desc="Hot tier used / capacity, highest across selected nodes. Only computed when OMLX reports a capacity.", no_value="Not reported") }},
+{{ stat(first_id + 4, "SSD KV cache used", 'sum(omlx_kv_cache_used_bytes{tier="ssd", ' ~ H ~ '})', x + 4 * w, y, w=w, h=h, unit="bytes", decimals=1,
+        desc="KV cache blocks OMLX keeps on disk (paged SSD tier), summed over models and selected nodes.", no_value="Not reported") }},
+{{ stat(first_id + 5, "SSD KV cache utilisation", 'max(omlx_kv_cache_utilization_percent{tier="ssd", ' ~ H ~ '})', x + 5 * w, y, w=w, h=h, unit="percent", decimals=1, spec=[["green", None], ["orange", 80], ["red", 95]],
+        desc="SSD tier used / its size limit, highest across selected nodes.", no_value="Not reported") }}
+{%- endmacro %}
+
+{%- macro kv_timeseries(first_id, x, y, H, w=8, h=8, by='tier') -%}
+{{ ts(first_id, "KV cache used vs capacity", [{"expr": 'sum by (' ~ by ~ ') (omlx_kv_cache_used_bytes{' ~ H ~ '})', "legend": lg(by) ~ " used"}, {"expr": 'sum by (tier) (omlx_kv_cache_capacity_bytes{' ~ H ~ '})', "legend": lg('tier') ~ " capacity"}], x, y, w=w, h=h, unit="bytes", min=0,
+      desc="OMLX KV cache per tier: hot = memory, ssd = disk. There is no separate 'allocated' figure: the hot tier's size is the memory it holds.", no_value="OMLX monitoring off or not reported") }},
+{{ ts(first_id + 1, "KV cache utilisation", [{"expr": 'max by (host_name, tier) (omlx_kv_cache_utilization_percent{' ~ H ~ '})', "legend": lg('host_name') ~ " " ~ lg('tier')}], x + w, y, w=w, h=h, unit="percent", min=0, max=100,
+      desc="Used / capacity per node and tier, computed by the telemetry agent from OMLX's figures.", no_value="OMLX monitoring off or not reported") }},
+{{ ts(first_id + 2, "KV cache block hit ratio and evictions", [{"expr": '100 * sum(rate(omlx_kv_cache_lookups_total{result="hit", ' ~ H ~ '}[$__rate_interval])) / (sum(rate(omlx_kv_cache_lookups_total{' ~ H ~ '}[$__rate_interval])) > 0)', "legend": "block hit %"}, {"expr": 'sum by (tier) (rate(omlx_kv_cache_evictions_total{' ~ H ~ '}[$__rate_interval])) * 60', "legend": "evictions/min " ~ lg('tier')}], x + 2 * w, y, w=w, h=h, unit="percent", min=0,
+      desc="Share of KV-block lookups OMLX served from its cache (hot or SSD tier), and blocks evicted per minute. OMLX's own counters, reset when OMLX restarts.", no_value="No lookups or OMLX monitoring off",
+      overrides=[{"matcher": {"id": "byRegexp", "options": "evictions.*"}, "properties": [{"id": "unit", "value": "short"}, {"id": "custom.axisPlacement", "value": "right"}]}]) }}
+{%- endmacro %}

@@ -4,7 +4,7 @@
     docs/LLM_OBSERVABILITY.md. -#}
 {% import 'llm_dashboard_macros.j2' as m %}
 {% set H = 'host_name=~"$host"' %}
-{% set F = 'host_name=~"$host", model=~"$model"' %}
+{% set F = 'host_name=~"$host", model=~"$model", framework=~"$framework"' %}
 {#- Empty when there is no LLM telemetry at all; 0 when the proxy is running
     and simply saw nothing. Keeps "no telemetry" distinct from "no traffic". -#}
 {% set proxy0 = ' or on() (0 * sum(mlx_telemetry_info{' ~ H ~ ', proxy="enabled"}))' %}
@@ -16,8 +16,8 @@ histogram_quantile({{ quantile }}, sum by (le{{ ', ' ~ by if by else '' }}) (rat
 {
   "uid": "{{ grafana_llm_overview_dashboard_uid }}",
   "title": "LLM Cluster Overview",
-  "description": "Fleet view of MLX-LM servers measured by the MLX telemetry agent. Request panels only cover clients that send requests through the telemetry proxy.",
-  "tags": ["llm", "mlx", "otel"],
+  "description": "Fleet view of MLX-LM and MLX-VLM servers measured by the MLX telemetry agent. Request panels only cover clients that send requests through the telemetry proxy.",
+  "tags": ["llm", "mlx", "mlx-vlm", "otel"],
   "timezone": "browser",
   "schemaVersion": 39,
   "version": 1,
@@ -47,13 +47,14 @@ histogram_quantile({{ quantile }}, sum by (le{{ ', ' ~ by if by else '' }}) (rat
         "query": {"qryType": 1, "query": "label_values(mlx_model_info{host_name=~\"$host\"}, model)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
         "refresh": 2, "regex": "", "sort": 1, "multi": true, "includeAll": true, "allValue": ".*",
         "current": {"selected": true, "text": ["All"], "value": ["$__all"]}, "options": [], "hide": 0
-      }
+      },
+      {{ m.framework_var('host_name=~"$host"') }}
     ]
   },
   "panels": [
     {{ m.row(1, "Summary (last 5 minutes)", 0) }},
     {{ m.stat(2, "LLM nodes online", 'sum(max by (host_name) (mlx_server_up{' ~ H ~ '}))', 0, 1,
-        desc="Nodes whose MLX-LM /health answered 200 at the last check (out of nodes reporting LLM telemetry).",
+        desc="Nodes whose inference server (MLX-LM or MLX-VLM) answered /health with 200 at the last check (out of nodes reporting LLM telemetry).",
         no_value="No LLM telemetry", decimals=0, spec=[["red", None], ["green", 1]]) }},
     {{ m.stat(3, "Requests", 'sum(increase(mlx_requests_total{' ~ F ~ '}[5m]))' ~ proxy0, 3, 1,
         desc="Inference requests through the telemetry proxy in the last 5 minutes. Clients that call MLX-LM directly are not counted.",
@@ -73,14 +74,14 @@ histogram_quantile({{ quantile }}, sum by (le{{ ', ' ~ by if by else '' }}) (rat
     {{ m.stat(8, "TTFT p95", hq(0.95, 'mlx_time_to_first_token_seconds', '[5m]'), 18, 1, unit="s",
         desc="95th percentile time to first generated content (streaming requests) from histogram buckets, last 5 minutes.",
         no_value="No streaming requests", decimals=2, spec=[["green", None], ["orange", 2], ["red", 5]]) }},
-    {{ m.stat(9, "MLX-LM availability", '100 * avg(avg_over_time(mlx_server_up{' ~ H ~ '}[5m]))', 21, 1, unit="percent",
+    {{ m.stat(9, "Server availability", '100 * avg(avg_over_time(mlx_server_up{' ~ H ~ '}[5m]))', 21, 1, unit="percent",
         desc="Share of /health checks that answered 200 across the selected nodes, last 5 minutes.",
         no_value="No LLM telemetry", decimals=1, spec=[["red", None], ["orange", 95], ["green", 99.5]]) }},
 
     {{ m.row(10, "Inference performance", 5) }},
     {{ m.ts(11, "Requests per minute", [{"expr": 'sum by (host_name) (rate(mlx_requests_total{' ~ F ~ '}' ~ ri ~ ')) * 60', "legend": m.lg('host_name')}], 0, 6, w=8, unit="reqpm",
         desc="Inference requests per minute through the telemetry proxy, per node.", no_value="No proxy telemetry", min=0) }},
-    {{ m.ts(12, "Time to first token", [{"expr": hq(0.5, 'mlx_time_to_first_token_seconds'), "legend": "p50"}, {"expr": hq(0.95, 'mlx_time_to_first_token_seconds'), "legend": "p95"}], 8, 6, w=8, unit="s",
+    {{ m.ts(12, "Streaming time to first token", [{"expr": hq(0.5, 'mlx_time_to_first_token_seconds'), "legend": "p50"}, {"expr": hq(0.95, 'mlx_time_to_first_token_seconds'), "legend": "p95"}], 8, 6, w=8, unit="s",
         desc="Streaming requests only: request start at the proxy to the first SSE event carrying content, reasoning or a tool call. Not time to HTTP headers.", no_value="No streaming requests", min=0) }},
     {{ m.ts(13, "Generation duration", [{"expr": hq(0.5, 'mlx_generation_duration_seconds'), "legend": "p50"}, {"expr": hq(0.95, 'mlx_generation_duration_seconds'), "legend": "p95"}], 16, 6, w=8, unit="s",
         desc="Streaming requests only: first generated content to end of stream ([DONE]).", no_value="No streaming requests", min=0) }},
@@ -98,7 +99,7 @@ histogram_quantile({{ quantile }}, sum by (le{{ ', ' ~ by if by else '' }}) (rat
         desc="Mean of the temperature value clients set explicitly. Requests that rely on the server default are not included.", no_value="No requests set temperature", min=0,
         overrides=[{"matcher": {"id": "byName", "options": "requests/min with explicit temperature"}, "properties": [{"id": "custom.axisPlacement", "value": "right"}, {"id": "unit", "value": "reqpm"}]}]) }},
     {{ m.ts(20, "Request duration (end to end)", [{"expr": hq(0.5, 'mlx_request_duration_seconds'), "legend": "p50"}, {"expr": hq(0.95, 'mlx_request_duration_seconds'), "legend": "p95"}], 0, 30, w=12, unit="s",
-        desc="Proxy receives the request to the last byte relayed, all outcomes.", no_value="No proxy telemetry", min=0) }},
+        desc="Proxy receives the request to the last byte relayed, all outcomes, streaming and non-streaming together (non-streaming alone: Frameworks section).", no_value="No proxy telemetry", min=0) }},
     {{ m.ts(21, "Responses by outcome and status", [{"expr": 'sum by (outcome, status_code) (rate(mlx_requests_total{' ~ F ~ '}' ~ ri ~ ')) * 60', "legend": m.lg('outcome') ~ " " ~ m.lg('status_code')}], 12, 30, w=12, unit="reqpm",
         desc="status_code is MLX-LM's status, or 502/504 when the proxy could not reach it or timed out.", no_value="No proxy telemetry", min=0, stack=true) }},
 
@@ -118,7 +119,7 @@ histogram_quantile({{ quantile }}, sum by (le{{ ', ' ~ by if by else '' }}) (rat
     {{ m.stat(27, "Usage not reported", 'sum(increase(mlx_requests_usage_missing_total{' ~ F ~ '}[1h]))' ~ proxy0, 12, 46, w=6,
         desc="Successful requests without a usage block in the last hour (token counters skip them rather than estimate).",
         no_value="No proxy telemetry", decimals=0, spec=[["green", None], ["orange", 1]]) }},
-    {{ m.text(28, "KV cache", "**Not instrumented.** mlx_lm.server 0.32.2 exposes no KV-cache size, utilisation, cached-sequence or eviction data through its API, and this project does not patch MLX-LM. These values are not estimated from host memory. See *Unavailable metrics* in docs/LLM_OBSERVABILITY.md.", 18, 46, w=6, h=4) }},
+    {{ m.text(28, "KV cache", "**Not exposed by mlx_lm.server / mlx_vlm.server here**, and not estimated from host memory. Macs running **OMLX** with `omlx_monitoring_enabled` report their KV cache in the *Frameworks and KV cache* section below. See docs/LLM_OBSERVABILITY.md.", 18, 46, w=6, h=4) }},
 
     {{ m.row(29, "Hardware", 50) }},
     {{ m.ts(30, "CPU busy", [{"expr": '100 * (1 - sum by (host_name) (rate(system_cpu_time_seconds_total{state="idle", ' ~ H ~ '}' ~ ri ~ ')) / sum by (host_name) (rate(system_cpu_time_seconds_total{' ~ H ~ '}' ~ ri ~ ')))', "legend": m.lg('host_name')}], 0, 51, w=8, unit="percent",
@@ -127,8 +128,8 @@ histogram_quantile({{ quantile }}, sum by (le{{ ', ' ~ by if by else '' }}) (rat
         desc="Existing host metrics; inactive memory is reclaimable and not counted as used.", min=0, max=100) }},
     {{ m.ts(32, "Memory pressure level", [{"expr": 'max by (host_name) (macos_memory_pressure_level{' ~ H ~ '})', "legend": m.lg('host_name')}], 16, 51, w=8, unit="short",
         desc="kern.memorystatus_vm_pressure_level: 0 normal, 1 warning, 2 critical.", no_value="Not collected", min=0, max=2, decimals=0) }},
-    {{ m.ts(33, "MLX-LM process memory", [{"expr": 'max by (host_name) (mlx_process_memory_footprint_bytes{' ~ H ~ '})', "legend": m.lg('host_name') ~ " footprint"}, {"expr": 'max by (host_name) (mlx_process_memory_rss_bytes{' ~ H ~ '})', "legend": m.lg('host_name') ~ " RSS"}], 0, 59, w=8, unit="bytes",
-        desc="Physical footprint (includes the Metal buffers holding weights and KV cache) and RSS (excludes most of them) of the MLX-LM server process.", no_value="MLX-LM process not found", min=0) }},
+    {{ m.ts(33, "Server process memory", [{"expr": 'max by (host_name) (mlx_process_memory_footprint_bytes{' ~ H ~ '})', "legend": m.lg('host_name') ~ " footprint"}, {"expr": 'max by (host_name) (mlx_process_memory_rss_bytes{' ~ H ~ '})', "legend": m.lg('host_name') ~ " RSS"}], 0, 59, w=8, unit="bytes",
+        desc="Physical footprint (includes the Metal buffers holding weights and KV cache) and RSS (excludes most of them) of the MLX-LM / MLX-VLM server process.", no_value="Server process not found", min=0) }},
     {{ m.ts(34, "Disk used (/)", [{"expr": 'sum by (host_name) (system_filesystem_usage_bytes{state="used", mountpoint="/", ' ~ H ~ '}) / sum by (host_name) (system_filesystem_usage_bytes{mountpoint="/", ' ~ H ~ '}) * 100', "legend": m.lg('host_name')}], 8, 59, w=8, unit="percent",
         desc="Existing host metrics (APFS container capacity).", min=0, max=100) }},
     {{ m.ts(35, "GPU utilisation", [{"expr": 'max by (host_name) (macos_gpu_utilization_percent{' ~ H ~ '})', "legend": m.lg('host_name')}], 16, 59, w=8, unit="percent",
@@ -150,13 +151,14 @@ histogram_quantile({{ quantile }}, sum by (le{{ ', ' ~ by if by else '' }}) (rat
           {"expr": 'time() - max by (host_name) (mlx_health_last_success_timestamp_seconds{check="http", ' ~ H ~ '})'},
           {"expr": 'time() - max by (host_name) (mlx_request_last_success_timestamp_seconds{' ~ F ~ '})'},
           {"expr": 'sum by (host_name) (increase(mlx_process_restarts_total{' ~ H ~ '}[1h]))'},
-          {"expr": 'time() - max by (host_name) (timestamp(mlx_telemetry_up{' ~ H ~ '}))'}], 0, 76, h=8,
-        desc="One row per node. Error rate covers the last 15 minutes of proxied requests; ages are seconds since the last successful /health check, the last successful inference request, and the last telemetry sample.",
+          {"expr": 'time() - max by (host_name) (timestamp(mlx_telemetry_up{' ~ H ~ '}))'},
+          {"expr": 'max by (host_name, framework) ((mlx_framework_info{' ~ H ~ '} and (time() - timestamp(mlx_framework_info{' ~ H ~ '})) < 90))'}], 0, 76, h=8,
+        desc="One row per node, with the framework detected there. Error rate covers the last 15 minutes of proxied requests; ages are seconds since the last successful /health check, the last successful inference request, and the last telemetry sample.",
         no_value="No LLM telemetry",
-        organize={"excludeByName": {"Time": true}, "indexByName": {"host_name": 0, "Value #A": 1, "Value #B": 2, "Value #C": 3, "Value #D": 4, "Value #E": 5, "Value #F": 6, "Value #G": 7},
-                  "renameByName": {"host_name": "Host", "Value #A": "MLX-LM /health", "Value #B": "Process", "Value #C": "Error rate 15m", "Value #D": "Since last health OK", "Value #E": "Since last inference", "Value #F": "Restarts 1h", "Value #G": "Telemetry age"}},
+        organize={"excludeByName": {"Time": true, "Value #H": true}, "indexByName": {"host_name": 0, "framework": 1, "Value #A": 2, "Value #B": 3, "Value #C": 4, "Value #D": 5, "Value #E": 6, "Value #F": 7, "Value #G": 8},
+                  "renameByName": {"host_name": "Host", "framework": "Framework", "Value #A": "Server /health", "Value #B": "Process", "Value #C": "Error rate 15m", "Value #D": "Since last health OK", "Value #E": "Since last inference", "Value #F": "Restarts 1h", "Value #G": "Telemetry age"}},
         overrides=[
-          {"matcher": {"id": "byName", "options": "MLX-LM /health"}, "properties": [{"id": "mappings", "value": m.up_down}, {"id": "custom.cellOptions", "value": {"type": "color-background"}}]},
+          {"matcher": {"id": "byName", "options": "Server /health"}, "properties": [{"id": "mappings", "value": m.up_down}, {"id": "custom.cellOptions", "value": {"type": "color-background"}}]},
           {"matcher": {"id": "byName", "options": "Process"}, "properties": [{"id": "mappings", "value": m.up_down}, {"id": "custom.cellOptions", "value": {"type": "color-background"}}]},
           {"matcher": {"id": "byName", "options": "Error rate 15m"}, "properties": [{"id": "unit", "value": "percent"}, {"id": "decimals", "value": 1}, {"id": "noValue", "value": "no requests"}]},
           {"matcher": {"id": "byName", "options": "Since last health OK"}, "properties": [{"id": "unit", "value": "s"}, {"id": "decimals", "value": 0}]},
@@ -169,8 +171,32 @@ histogram_quantile({{ quantile }}, sum by (le{{ ', ' ~ by if by else '' }}) (rat
         no_value="None",
         organize={"excludeByName": {"Time": true}, "renameByName": {"host_name": "Host", "Value": "Seconds since last sample"}}) }},
     {{ m.ts(45, "Upstream connection failures", [{"expr": 'sum by (host_name, reason) (rate(mlx_upstream_connection_failures_total{' ~ H ~ '}' ~ ri ~ ')) * 60', "legend": m.lg('host_name') ~ " " ~ m.lg('reason')}], 8, 84, w=8, h=6, unit="short",
-        desc="Times per minute the proxy could not connect to, or read from, MLX-LM.", no_value="No proxy telemetry", min=0) }},
+        desc="Times per minute the proxy could not connect to, or read from, the inference server.", no_value="No proxy telemetry", min=0) }},
     {{ m.ts(46, "Recent request failures", [{"expr": 'sum by (host_name, outcome) (increase(mlx_requests_total{' ~ F ~ ', outcome!="success"}' ~ ri ~ '))', "legend": m.lg('host_name') ~ " " ~ m.lg('outcome')}], 16, 84, w=8, h=6, unit="short",
-        desc="Failed requests per interval by outcome.", no_value="No proxy telemetry", min=0, draw="bars") }}
+        desc="Failed requests per interval by outcome.", no_value="No proxy telemetry", min=0, draw="bars") }},
+
+    {{ m.row(47, "Frameworks and KV cache (OMLX)", 90) }},
+    {{ m.stat(48, "MLX-LM nodes", 'count(max by (host_name) ((mlx_framework_info{framework="mlx-lm", ' ~ H ~ '} and (time() - timestamp(mlx_framework_info{framework="mlx-lm", ' ~ H ~ '})) < 90)))', 0, 91, w=4, decimals=0,
+        desc="Nodes whose agent detected (or was configured with, llm_framework) MLX-LM.", no_value="None") }},
+    {{ m.stat(49, "MLX-VLM nodes", 'count(max by (host_name) ((mlx_framework_info{framework="mlx-vlm", ' ~ H ~ '} and (time() - timestamp(mlx_framework_info{framework="mlx-vlm", ' ~ H ~ '})) < 90)))', 4, 91, w=4, decimals=0,
+        desc="Nodes whose agent detected (or was configured with, llm_framework) MLX-VLM.", no_value="None") }},
+    {{ m.stat(50, "Framework not detected", 'count(max by (host_name) ((mlx_framework_info{framework="unknown", ' ~ H ~ '} and (time() - timestamp(mlx_framework_info{framework="unknown", ' ~ H ~ '})) < 90)))', 8, 91, w=4, decimals=0, spec=[["orange", None]],
+        desc="Nodes where neither MLX-LM nor MLX-VLM answers on mlx_server_port and no server process was found. Their health panels report the server down; set llm_framework only if a server runs but cannot be identified.", no_value="None") }},
+    {{ m.stat(51, "OMLX KV stats reporting", 'sum(max by (host_name) (omlx_up{' ~ H ~ '}))', 12, 91, w=4, decimals=0,
+        desc="Nodes whose last OMLX /admin/api/stats poll succeeded (of those with omlx_monitoring_enabled).", no_value="OMLX monitoring off") }},
+    {{ m.stat(52, "Hot KV cache utilisation (max)", 'max(omlx_kv_cache_utilization_percent{tier="hot", ' ~ H ~ '})', 16, 91, w=4, unit="percent", decimals=1, spec=[["green", None], ["orange", 80], ["red", 95]],
+        desc="Highest OMLX in-memory KV tier used / capacity across selected nodes.", no_value="Not reported") }},
+    {{ m.stat(53, "KV block hit ratio (1h)", '100 * sum(increase(omlx_kv_cache_lookups_total{result="hit", ' ~ H ~ '}[1h])) / (sum(increase(omlx_kv_cache_lookups_total{' ~ H ~ '}[1h])) > 0)', 20, 91, w=4, unit="percent", decimals=1,
+        desc="Share of KV-block lookups OMLX served from its cache in the last hour.", no_value="No lookups or OMLX off") }},
+    {{ m.ts(54, "Requests per minute by framework", [{"expr": 'sum by (framework) (rate(mlx_requests_total{' ~ F ~ '}' ~ ri ~ ')) * 60', "legend": m.lg('framework')}], 0, 95, w=8, unit="reqpm", min=0, stack=true,
+        desc="Requests through the telemetry proxy by detected framework.", no_value="No proxy telemetry") }},
+    {{ m.ts(55, "Streaming TTFT p95 by framework", [{"expr": hq(0.95, 'mlx_time_to_first_token_seconds', by='framework'), "legend": m.lg('framework')}], 8, 95, w=8, unit="s", min=0,
+        desc="Streaming requests only: request start to the first SSE event with generated content.", no_value="No streaming requests") }},
+    {{ m.ts(56, "Non-streaming request latency p95 by framework", [{"expr": 'histogram_quantile(0.95, sum by (le, framework) (rate(mlx_request_duration_seconds_bucket{' ~ F ~ ', stream="false", outcome="success"}' ~ ri ~ ')))', "legend": m.lg('framework')}], 16, 95, w=8, unit="s", min=0,
+        desc="Successful non-streaming requests, start to complete response. The proxy sees the response only after generation, so this is whole-request latency, not TTFT.", no_value="No non-streaming requests") }},
+    {{ m.ts(57, "KV cache utilisation by node", [{"expr": 'max by (host_name, tier) (omlx_kv_cache_utilization_percent{' ~ H ~ '})', "legend": m.lg('host_name') ~ " " ~ m.lg('tier')}], 0, 103, w=12, unit="percent", min=0, max=100,
+        desc="OMLX KV cache used / capacity per node and tier (hot = memory, ssd = disk).", no_value="OMLX monitoring off or not reported") }},
+    {{ m.ts(58, "KV cache used by node", [{"expr": 'sum by (host_name, tier) (omlx_kv_cache_used_bytes{' ~ H ~ '})', "legend": m.lg('host_name') ~ " " ~ m.lg('tier')}], 12, 103, w=12, unit="bytes", min=0,
+        desc="OMLX KV cache held per node and tier, summed over its models.", no_value="OMLX monitoring off or not reported") }}
   ]
 }

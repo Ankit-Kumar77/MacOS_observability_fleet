@@ -39,6 +39,7 @@ import ctypes.util
 import http.client
 import json
 import logging
+import math
 import os
 import re
 import signal
@@ -51,7 +52,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 LOG = logging.getLogger("mlx-telemetry")
 
 # --------------------------------------------------------------------------
@@ -106,6 +107,12 @@ DEFAULTS = {
     "omlx_timeout_seconds": 5,
     "vlm_cache_stats_enabled": True,
     "activity_expected": False,
+    "tool_label_max_values": 50,
+    "confidence_metrics_enabled": False,
+    "confidence_inject_logprobs": False,
+    "confidence_low_token_probability": 0.5,
+    "confidence_low_response_ratio": 0.2,
+    "server_log_path": "",
     "buckets": {
         "request_duration": [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300],
         "time_to_first_token": [0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30],
@@ -114,6 +121,8 @@ DEFAULTS = {
         "tokens": [16, 64, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072],
         "ratio": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
         "temperature": [0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0, 1.2, 1.5, 2.0],
+        "probability": [0.3, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.98, 0.99, 1.0],
+        "perplexity": [1, 1.05, 1.1, 1.25, 1.5, 2, 3, 5, 10, 20, 50, 100],
     },
 }
 
@@ -142,6 +151,11 @@ _TYPES = {
     "omlx_poll_interval_seconds": (int, float), "omlx_timeout_seconds": (int, float),
     "vlm_cache_stats_enabled": bool,
     "activity_expected": bool, "buckets": dict,
+    "tool_label_max_values": int, "confidence_metrics_enabled": bool,
+    "confidence_inject_logprobs": bool,
+    "confidence_low_token_probability": (int, float),
+    "confidence_low_response_ratio": (int, float),
+    "server_log_path": str,
 }
 
 
@@ -179,6 +193,11 @@ def load_config(path):
                 "omlx_timeout_seconds"):
         if cfg[key] <= 0:
             problems.append("%s must be positive" % key)
+    for key in ("confidence_low_token_probability", "confidence_low_response_ratio"):
+        if not 0 < cfg[key] <= 1:
+            problems.append("%s must be in (0, 1]" % key)
+    if cfg["tool_label_max_values"] < 1:
+        problems.append("tool_label_max_values must be at least 1")
     if cfg["framework"] not in ("auto",) + FRAMEWORKS:
         problems.append("framework must be one of auto, %s" % ", ".join(FRAMEWORKS))
     if not cfg["omlx_url"].startswith(("http://", "https://")):
@@ -420,6 +439,15 @@ class Metrics:
         self.context_utilization = r.histogram("mlx.request.context_utilization", "", "Context tokens / model maximum context length, per request", b["ratio"])
         self.temperature = r.histogram("mlx.request.temperature", "", "Sampling temperature explicitly set by the client", b["temperature"])
         self.tool_calls = r.counter("mlx.tool_calls", "{call}", "Tool calls returned by MLX-LM")
+        self.tool_calls_by_tool = r.counter("mlx.tool_calls.by_tool", "{call}", "Tool calls per function name (sanitised, capped by tool_label_max_values; the rest are 'other')")
+        self.responses = r.counter("mlx.responses", "{response}", "Successful responses by kind (chat, reasoning, tool_call, completion) and finish_reason")
+        # Optional token confidence from the sampled tokens' logprobs.
+        self.c_scored = r.counter("mlx.confidence.scored", "{response}", "Responses scored from token logprobs, by source (client = the client asked for logprobs, injected = the proxy asked)")
+        self.c_low = r.counter("mlx.confidence.low_confidence_responses", "{response}", "Scored responses whose share of low-probability tokens reached confidence_low_response_ratio")
+        self.c_mean = r.histogram("mlx.confidence.mean_token_probability", "", "Mean probability of the sampled tokens per response", b["probability"])
+        self.c_min = r.histogram("mlx.confidence.min_token_probability", "", "Probability of the least likely sampled token per response", b["probability"])
+        self.c_ppl = r.histogram("mlx.confidence.perplexity", "", "exp(-mean token logprob) per response; 1 = fully certain", b["perplexity"])
+        self.c_low_ratio = r.histogram("mlx.confidence.low_token_ratio", "", "Share of sampled tokens below confidence_low_token_probability per response", b["ratio"])
         self.last_success = r.gauge("mlx.request.last_success_timestamp", "s", "Unix time of the last successful inference request")
         # Server and process health.
         self.server_up = r.gauge("mlx.server.up", "", "1 if MLX-LM /health answered 200 at the last check")
@@ -439,6 +467,10 @@ class Metrics:
         self.launchd_runs = r.gauge("mlx.process.launchd_runs", "{run}", "launchd 'runs' count for the MLX-LM LaunchAgent (mlx_launchagent_label)")
         self.model_info = r.gauge("mlx.model.info", "", "Model served, value always 1")
         self.model_max_context = r.gauge("mlx.model.context_length.max", "{token}", "Maximum context length from the model config or llm_model_max_context_tokens")
+        self.model_config = r.gauge("mlx.model.config", "", "Architecture figures from the model's config.json, per attr (layers, attention_heads, kv_heads, head_dim, hidden_size, intermediate_size, vocab_size, quant_bits, quant_group_size)")
+        self.model_arch = r.gauge("mlx.model.architecture", "", "Model architecture and type from config.json, value always 1")
+        self.model_kv_per_token = r.gauge("mlx.model.kv_cache.per_token", "By", "Estimated KV-cache bytes per token: 2 x layers x kv_heads x head_dim x 2 bytes (fp16, full attention)")
+        self.model_weights = r.gauge("mlx.model.weights.size", "By", "Size of the model's weight files (*.safetensors) on disk")
         self.framework_info = r.gauge("mlx.framework.info", "", "Inference framework on this node (mlx-lm, mlx-vlm or unknown) and how it was detected, value always 1")
         # Timings the server itself reports in its response (MLX-VLM "timings"); MLX-LM sends none.
         self.server_tps = r.histogram("mlx.server_reported.tokens_per_second", "", "Generation rate the server reports per request (timings.predicted_per_second)", b["tokens_per_second"])
@@ -502,9 +534,21 @@ class State:
         self.served_model_source = "config" if self.served_model else ""
         self.known_models = set()
         self.seen_labels = set()
+        self.seen_tools = set()
         # Set by Health on every tick; read by the proxy for the framework label.
         self.framework = cfg["framework"] if cfg["framework"] in FRAMEWORKS else "unknown"
         self.framework_source = "config" if cfg["framework"] in FRAMEWORKS else "none"
+
+    def tool_label(self, name):
+        """Bounded tool label: sanitised function name, capped by
+        tool_label_max_values (later new names become 'other')."""
+        label = re.sub(r"[^A-Za-z0-9._:-]", "_", name.strip())[:64] if isinstance(name, str) and name.strip() else "unknown"
+        with self.lock:
+            if label not in self.seen_tools:
+                if len(self.seen_tools) >= self.cfg["tool_label_max_values"]:
+                    return "other"
+                self.seen_tools.add(label)
+        return label
 
     def model_label(self, requested):
         cfg = self.cfg
@@ -735,13 +779,25 @@ class ProxyHandler(BaseHTTPRequestHandler):
             body = json.dumps(req).encode()
             injected = True
         framework = state.framework
+        # Optional: ask MLX-LM for the sampled tokens' logprobs on non-streaming
+        # requests and strip them from the reply. MLX-LM serialises with
+        # json.dumps defaults, so the stripped reply is byte-identical to the
+        # one it sends without logprobs. Only MLX-LM, whose format is known.
+        strip_logprobs = False
+        if (req is not None and not stream and cfg["confidence_metrics_enabled"]
+                and cfg["confidence_inject_logprobs"] and framework == "mlx-lm"
+                and "logprobs" not in req and "top_logprobs" not in req):
+            req["logprobs"] = True
+            body = json.dumps(req).encode()
+            strip_logprobs = True
         temperature = req.get("temperature") if req else None
         if isinstance(temperature, (int, float)) and not isinstance(temperature, bool):
             m.temperature.observe(float(temperature), model=model, framework=framework)
 
         result = {"status": 0, "outcome": "success", "usage": None, "timings": None, "t_first": None,
                   "t_end": None, "tool_calls": 0, "text": [] if cfg["quality_metrics_enabled"] else None,
-                  "text_len": 0}
+                  "text_len": 0, "finish_reason": None, "reasoning": False, "tool_names": [],
+                  "logprobs": None, "logprobs_source": None, "strip_logprobs": strip_logprobs}
         labels = {"model": model, "endpoint": endpoint, "stream": "true" if stream else "false",
                   "framework": framework}
         self._set_active(m, state, 1)
@@ -764,7 +820,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if resp.status == 200 and "text/event-stream" in ctype:
                 self._relay_stream(resp, result, injected)
             else:
-                self._relay_whole(resp, result, stream)
+                self._relay_whole(resp, result)
         except _ClientGone:
             result["outcome"] = "client_disconnected"
             self.close_connection = True
@@ -788,7 +844,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         # One series, labelled with the node's current framework.
         metrics.active.replace([(cls._active_delta(delta), {"framework": state.framework})])
 
-    def _relay_whole(self, resp, result, stream):
+    def _relay_whole(self, resp, result):
         try:
             data = resp.read()
         except socket.timeout:
@@ -801,6 +857,18 @@ class ProxyHandler(BaseHTTPRequestHandler):
             result.update(status=502, outcome="upstream_error")
             self._send_json(502, {"error": "MLX-LM server connection failed"})
             return
+        obj = None
+        if resp.status == 200:
+            try:
+                obj = json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                obj = None
+        if isinstance(obj, dict):
+            self._observe_whole(obj, result)
+            if result["strip_logprobs"] and result["logprobs"] is not None:
+                # The client did not ask for logprobs: hand back the reply
+                # exactly as the server would have sent it without them.
+                data = json.dumps(obj).encode()
         self._relay_headers(resp, close=False)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -810,23 +878,49 @@ class ProxyHandler(BaseHTTPRequestHandler):
             result["outcome"] = "server_error"
         elif resp.status >= 400:
             result["outcome"] = "client_error"
-        if resp.status != 200:
+
+    def _observe_whole(self, obj, result):
+        result["usage"] = obj.get("usage") if isinstance(obj.get("usage"), dict) else None
+        self._collect_timings(result, obj.get("timings"))
+        for choice in obj.get("choices") or []:
+            if not isinstance(choice, dict):
+                continue
+            self._collect_finish(result, choice)
+            message = choice.get("message") or {}
+            if isinstance(message, dict):
+                self._collect_tools(result, message.get("tool_calls"), streaming=False)
+                self._collect_text(result, message.get("content"))
+                if message.get("reasoning") or message.get("reasoning_content"):
+                    result["reasoning"] = True
+            self._collect_text(result, choice.get("text"))
+            if "logprobs" in choice:
+                logprobs = choice.pop("logprobs") if result["strip_logprobs"] else choice.get("logprobs")
+                if result["logprobs"] is None:
+                    result["logprobs"] = _sampled_logprobs(logprobs, self.state.framework)
+                    result["logprobs_source"] = "injected" if result["strip_logprobs"] else "client"
+
+    @staticmethod
+    def _collect_finish(result, choice):
+        reason = choice.get("finish_reason")
+        if isinstance(reason, str) and reason:
+            result["finish_reason"] = reason
+
+    @staticmethod
+    def _collect_tools(result, tools, streaming):
+        """Count tool calls and keep their function names. Streaming servers
+        that split one call over several deltas send the name (and id) only
+        in the first fragment, so only fragments carrying one are counted."""
+        if not isinstance(tools, list):
             return
-        try:
-            obj = json.loads(data.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
-            return
-        if isinstance(obj, dict):
-            result["usage"] = obj.get("usage") if isinstance(obj.get("usage"), dict) else None
-            self._collect_timings(result, obj.get("timings"))
-            for choice in obj.get("choices") or []:
-                if not isinstance(choice, dict):
-                    continue
-                message = choice.get("message") or {}
-                if isinstance(message, dict):
-                    result["tool_calls"] += len(message.get("tool_calls") or [])
-                    self._collect_text(result, message.get("content"))
-                self._collect_text(result, choice.get("text"))
+        for call in tools:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function") if isinstance(call.get("function"), dict) else {}
+            name = function.get("name")
+            if streaming and not name and not call.get("id"):
+                continue
+            result["tool_calls"] += 1
+            result["tool_names"].append(name if isinstance(name, str) else "")
 
     def _relay_stream(self, resp, result, injected):
         self._relay_headers(resp, close=True)
@@ -886,13 +980,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
         for choice in choices:
             if not isinstance(choice, dict):
                 continue
+            self._collect_finish(result, choice)
             delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
             content = delta.get("content")
             reasoning = delta.get("reasoning") or delta.get("reasoning_content")
             tools = delta.get("tool_calls") or []
             text = choice.get("text")
-            if tools:
-                result["tool_calls"] += len(tools)
+            self._collect_tools(result, tools, streaming=True)
+            if reasoning:
+                result["reasoning"] = True
             if (content or reasoning or tools or text) and result["t_first"] is None:
                 result["t_first"] = time.monotonic()
             self._collect_text(result, content)
@@ -932,6 +1028,21 @@ class ProxyHandler(BaseHTTPRequestHandler):
         m.last_success.set(time.time(), **mf)
         if result["tool_calls"]:
             m.tool_calls.add(result["tool_calls"], **mf)
+            for name in result["tool_names"]:
+                m.tool_calls_by_tool.add(1, tool=state.tool_label(name), **mf)
+        m.responses.add(1, kind=_response_kind(endpoint, result), finish_reason=_finish_label(result["finish_reason"]), **labels)
+        if cfg["confidence_metrics_enabled"] and result["logprobs"]:
+            scored = score_confidence(result["logprobs"], cfg)
+            mean, low_prob, perplexity, low_ratio = scored
+            m.c_scored.add(1, source=result["logprobs_source"], **mf)
+            m.c_mean.observe(mean, **mf)
+            m.c_min.observe(low_prob, **mf)
+            m.c_ppl.observe(perplexity, **mf)
+            m.c_low_ratio.observe(low_ratio, **mf)
+            if low_ratio >= cfg["confidence_low_response_ratio"]:
+                m.c_low.add(1, **mf)
+            else:
+                m.c_low.touch(**mf)
         usage = result["usage"] or {}
         prompt = usage.get("prompt_tokens")
         completion = usage.get("completion_tokens")
@@ -976,6 +1087,61 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     m.q_flags.add(1, flag=flag, **mf)
                 if flags:
                     m.q_flagged.add(1, **mf)
+
+
+_FINISH_REASONS = ("stop", "length", "tool_calls", "content_filter", "function_call")
+
+
+def _finish_label(reason):
+    """Bounded finish_reason label: the OpenAI values, else other / none."""
+    if reason is None:
+        return "none"
+    return reason if reason in _FINISH_REASONS else "other"
+
+
+def _response_kind(endpoint, result):
+    """What the response was: a legacy completion, a tool call, a reasoning
+    (thinking) answer or a plain chat answer, in that precedence."""
+    if endpoint == "completion":
+        return "completion"
+    if result["tool_calls"]:
+        return "tool_call"
+    if result["reasoning"]:
+        return "reasoning"
+    return "chat"
+
+
+def _sampled_logprobs(logprobs, framework):
+    """Logprobs of the sampled tokens from an OpenAI-style logprobs block
+    (chat: content[].logprob; legacy completions: token_logprobs[]), or None.
+    MLX-LM in top_logprobs mode reports the first entry of an unsorted top-k
+    partition instead of the sampled token, so such replies are not scored."""
+    if not isinstance(logprobs, dict):
+        return None
+    values = []
+    content = logprobs.get("content")
+    if isinstance(content, list):
+        for entry in content:
+            if not isinstance(entry, dict):
+                continue
+            if framework == "mlx-lm" and entry.get("top_logprobs"):
+                return None
+            if _is_number(entry.get("logprob")):
+                values.append(float(entry["logprob"]))
+    elif isinstance(logprobs.get("token_logprobs"), list):
+        values = [float(v) for v in logprobs["token_logprobs"] if _is_number(v)]
+    return values or None
+
+
+def score_confidence(logprobs, cfg):
+    """(mean token probability, lowest token probability, perplexity, share
+    of tokens below confidence_low_token_probability) of the sampled tokens.
+    A measure of how sure the model was, not of whether it was right."""
+    probs = [math.exp(min(0.0, lp)) for lp in logprobs]
+    mean_lp = sum(min(0.0, lp) for lp in logprobs) / len(logprobs)
+    threshold = cfg["confidence_low_token_probability"]
+    low = sum(1 for p in probs if p < threshold) / float(len(probs))
+    return sum(probs) / len(probs), min(probs), math.exp(-mean_lp), low
 
 
 def _is_number(value):
@@ -1131,10 +1297,64 @@ def _find_config_json(model, cfg):
     for path in candidates:
         try:
             with open(path, encoding="utf-8") as handle:
-                return json.load(handle)
+                config = json.load(handle)
         except (OSError, ValueError):
             continue
+        if isinstance(config, dict):
+            config["__dir__"] = os.path.dirname(path)
+            return config
     return None
+
+
+_ARCH_KEYS = (("layers", ("num_hidden_layers", "n_layer", "num_layers")),
+              ("attention_heads", ("num_attention_heads", "n_head")),
+              ("kv_heads", ("num_key_value_heads",)),
+              ("head_dim", ("head_dim",)),
+              ("hidden_size", ("hidden_size", "n_embd", "d_model")),
+              ("intermediate_size", ("intermediate_size",)),
+              ("vocab_size", ("vocab_size",)))
+
+
+def _architecture_from(config):
+    """(numeric attrs, labels, kv bytes per token or None, weights bytes or
+    None) from a model's config.json. VLM configs keep the language model
+    under text_config. The KV estimate assumes full attention and an fp16 KV
+    cache: sliding-window, linear-attention or quantised KV caches use less."""
+    if not isinstance(config, dict):
+        return {}, {}, None, None
+    text = config.get("text_config") if isinstance(config.get("text_config"), dict) else {}
+    attrs = {}
+    for attr, keys in _ARCH_KEYS:
+        for scope in (text, config):
+            value = next((scope[k] for k in keys if _is_count(scope.get(k)) and scope.get(k) > 0), None)
+            if value is not None:
+                attrs[attr] = value
+                break
+    if "kv_heads" not in attrs and "attention_heads" in attrs:
+        attrs["kv_heads"] = attrs["attention_heads"]
+    if "head_dim" not in attrs and attrs.get("hidden_size") and attrs.get("attention_heads"):
+        attrs["head_dim"] = attrs["hidden_size"] // attrs["attention_heads"]
+    quant = config.get("quantization") if isinstance(config.get("quantization"), dict) else {}
+    for attr, key in (("quant_bits", "bits"), ("quant_group_size", "group_size")):
+        if _is_count(quant.get(key)):
+            attrs[attr] = quant[key]
+    archs = config.get("architectures")
+    labels = {"architecture": str(archs[0])[:64] if isinstance(archs, list) and archs else "unknown",
+              "model_type": str(config.get("model_type") or text.get("model_type") or "unknown")[:64],
+              "quantization": ("%s-bit" % attrs["quant_bits"]) if "quant_bits" in attrs else "none"}
+    kv = None
+    if all(k in attrs for k in ("layers", "kv_heads", "head_dim")):
+        kv = 2 * attrs["layers"] * attrs["kv_heads"] * attrs["head_dim"] * 2
+    weights = None
+    directory = config.get("__dir__")
+    if directory:
+        try:
+            sizes = [os.path.getsize(os.path.join(directory, name)) for name in os.listdir(directory)
+                     if name.endswith(".safetensors")]
+            weights = sum(sizes) if sizes else None
+        except OSError:
+            weights = None
+    return attrs, labels, kv, weights
 
 
 def _max_context_from(config):
@@ -1171,6 +1391,10 @@ class Health:
         self.ready = threading.Event()
         self.last_pid = None
         self.raw_model = ""
+        self.raw_command = ""
+        self.config_key = None
+        self.model_config = None
+        self.lm_log = MLXLMLogCollector(cfg, metrics) if cfg["server_log_path"] else None
         self.next_models = 0.0
         self.next_probe = 0.0
         self.next_hardware = 0.0
@@ -1183,7 +1407,8 @@ class Health:
                      "proxy": "enabled" if cfg["proxy_enabled"] else "disabled",
                      "hardware": "enabled" if cfg["hardware_metrics_enabled"] else "disabled",
                      "quality": "enabled" if cfg["quality_metrics_enabled"] else "disabled",
-                     "omlx": "enabled" if cfg["omlx_enabled"] else "disabled"}
+                     "omlx": "enabled" if cfg["omlx_enabled"] else "disabled",
+                     "confidence": "enabled" if cfg["confidence_metrics_enabled"] else "disabled"}
         self._publish_framework()
         m.activity_expected.set(1 if cfg["activity_expected"] else 0)
 
@@ -1245,6 +1470,8 @@ class Health:
             self.next_vlm_cache = now + self.cfg["models_check_interval_seconds"]
             self.vlm_cache.poll(self.state.framework == "mlx-vlm", self.base, self.state.served_model or "unknown")
         self.update_model()
+        if self.lm_log is not None:
+            self.lm_log.poll(self.state.framework == "mlx-lm", self.state.served_model or "unknown", self.raw_command)
         self.m.telemetry_up.set(1)
         self.ready.set()
 
@@ -1311,6 +1538,7 @@ class Health:
         self.last_pid = pid
         if command:
             self.raw_model = _model_from_argv(command) or self.raw_model
+            self.raw_command = command
         rc, out = _run(["ps", "-o", "rss=,%cpu=,etime=", "-p", str(pid)])
         fields = out.split()
         if rc == 0 and len(fields) >= 3:
@@ -1452,11 +1680,20 @@ class Health:
         with state.lock:
             state.served_model, state.served_model_source = model, source
         m.model_info.replace([(1, {"model": model, "source": source})] if model else [])
-        max_ctx = cfg["model_max_context_tokens"]
-        if not max_ctx and (self.raw_model or cfg["model_path"]):
-            max_ctx = _max_context_from(_find_config_json(self.raw_model, cfg))
+        key = (self.raw_model, cfg["model_path"])
+        if key != self.config_key:
+            # Read once per model, not on every tick.
+            self.config_key = key
+            self.model_config = _find_config_json(self.raw_model, cfg) if any(key) else None
+        max_ctx = cfg["model_max_context_tokens"] or _max_context_from(self.model_config)
         state.max_context = max_ctx
-        m.model_max_context.replace([(max_ctx, {"model": model or "unknown"})] if max_ctx else [])
+        label = model or "unknown"
+        m.model_max_context.replace([(max_ctx, {"model": label})] if max_ctx else [])
+        attrs, arch, kv, weights = _architecture_from(self.model_config)
+        m.model_config.replace([(v, {"model": label, "attr": a}) for a, v in sorted(attrs.items())])
+        m.model_arch.replace([(1, dict(arch, model=label))] if arch else [])
+        m.model_kv_per_token.replace([(kv, {"model": label})] if kv else [])
+        m.model_weights.replace([(weights, {"model": label})] if weights else [])
 
     # -- hardware ------------------------------------------------------------
 
@@ -1741,6 +1978,93 @@ class VLMCacheCollector(KVCollector):
             counter.retain(src, {model})
         self.publish(used, {"hot": _num(snap, "memory_max_bytes"), "ssd": _num(snap, "disk_max_bytes")},
                      entries, {"hot": _num(snap, "num_blocks")}, seen)
+
+
+_LM_CACHE_LINE = re.compile(r"Prompt Cache: (\d+) sequences?, ([\d.]+) GB")
+
+
+def _size_from_argv(command, flag):
+    """--prompt-cache-bytes / --prompt-cache-size from the server command
+    line. Sizes accept MLX-LM's suffixes (K, M, G, T, optionally with B)."""
+    match = re.search(r"%s(?:=|\s+)(\S+)" % re.escape(flag), command or "")
+    if not match:
+        return None
+    match = re.match(r"^(\d+(?:\.\d+)?)\s*([KMGT]?)B?$", match.group(1).upper())
+    if not match:
+        return None
+    return int(float(match.group(1)) * _SIZE.get(match.group(2) or "B", 1))
+
+
+class MLXLMLogCollector(KVCollector):
+    """MLX-LM's prompt (KV) cache, read from its own log. mlx_lm.server has no
+    stats endpoint, but logs 'Prompt Cache: <n> sequences, <x> GB' (INFO)
+    before it serves each request. With server_log_path set, the agent tails
+    that file (MLX-LM's stderr, e.g. its LaunchAgent's StandardErrorPath) and
+    reports the latest line: hot used = x GB (10 MB resolution), entries = n,
+    entries capacity = --prompt-cache-size (default 10), capacity =
+    --prompt-cache-bytes when set. The figures describe the cache just before
+    the latest request, not after it. Only these lines are read; nothing else
+    from the log is kept or exported."""
+    source = "mlx-lm"
+
+    def __init__(self, cfg, metrics):
+        KVCollector.__init__(self, cfg, metrics)
+        self.path = os.path.expanduser(cfg["server_log_path"])
+        self.inode, self.offset, self.mtime = None, 0, None
+        self.latest = None
+        self.active = False
+
+    def _read_new(self):
+        """Lines appended since the last poll. A new inode or a shorter file
+        (rotation, truncation) is read from the start; the first poll starts
+        from the last 64 KiB so an old figure is picked up at once."""
+        st = os.stat(self.path)
+        rewritten = st.st_size == self.offset and st.st_mtime_ns != self.mtime
+        if st.st_ino != self.inode or st.st_size < self.offset or rewritten:
+            self.inode = st.st_ino
+            self.offset = max(0, st.st_size - 65536) if self.latest is None else 0
+        self.mtime = st.st_mtime_ns
+        if st.st_size == self.offset:
+            return []
+        with open(self.path, "rb") as handle:
+            handle.seek(self.offset)
+            data = handle.read(min(st.st_size - self.offset, 4194304))
+        cut = data.rfind(b"\n")
+        if cut < 0:
+            return []
+        self.offset += cut + 1
+        return data[:cut].decode("utf-8", "replace").splitlines()
+
+    def poll(self, is_lm, model, command):
+        if not is_lm:
+            if self.active:
+                self.clear(up=0)
+                self.m.kv_up.replace([], source=self.source)
+                self.active = False
+            return
+        if not self.active:
+            self.start_reporting()
+            self.active = True
+        try:
+            lines = self._read_new()
+        except OSError:
+            return self.fail("connect")
+        for line in lines:
+            match = _LM_CACHE_LINE.search(line)
+            if match:
+                self.latest = (int(match.group(1)), float(match.group(2)) * 1e9)
+        if self.latest is None:
+            # Readable, but MLX-LM has not served a request since it started
+            # logging (or logs below INFO): nothing to report yet.
+            self.clear(up=1)
+            return
+        sequences, used = self.latest
+        model = self._model(model)
+        size = _size_from_argv(command, "--prompt-cache-size")
+        self.publish([(used, {"tier": "hot", "model": model})],
+                     {"hot": _size_from_argv(command, "--prompt-cache-bytes")},
+                     [(sequences, {"tier": "hot", "model": model})],
+                     {"hot": size if size else 10}, {"hot_used": True})
 
 
 # --------------------------------------------------------------------------

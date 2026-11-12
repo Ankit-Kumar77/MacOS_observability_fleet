@@ -1,0 +1,196 @@
+{#- Managed by Ansible. Panel builders shared by the provisioned dashboards
+    (LLM, SLO, platform), imported with {% import 'dashboard_macros.j2' as m %}.
+    Every string goes through tojson, so PromQL is written with plain double
+    quotes and never hand-escaped. Grafana legend syntax is produced by lg(),
+    because a literal double-brace would be read as a Jinja expression.
+
+    All panels use the existing VictoriaMetrics datasource (uid victoriametrics).
+    noValue texts say why a panel is empty instead of showing a fake zero. -#}
+{% set ds = {"type": "prometheus", "uid": "victoriametrics"} %}
+
+{%- macro lg(name) -%}{{ '{{' }}{{ name }}{{ '}}' }}{%- endmacro %}
+
+{%- macro steps(spec) -%}
+[{% for color, value in spec %}{"color": {{ color | tojson }}, "value": {{ value | tojson }}}{{ '' if loop.last else ', ' }}{% endfor %}]
+{%- endmacro %}
+
+{%- macro targets(exprs, instant=false, table=false) -%}
+[{% for t in exprs %}{"refId": {{ "ABCDEFGHIJ"[loop.index0] | tojson }}, "datasource": {{ ds | tojson }}, "expr": {{ t.expr | tojson }}, "legendFormat": {{ t.legend | default('') | tojson }}{% if instant %}, "instant": true, "range": false{% else %}, "range": true{% endif %}{% if table %}, "format": "table"{% endif %}}{{ '' if loop.last else ', ' }}{% endfor %}]
+{%- endmacro %}
+
+{%- macro row(id, title, y) -%}
+{"id": {{ id }}, "type": "row", "title": {{ title | tojson }}, "collapsed": false, "gridPos": {"x": 0, "y": {{ y }}, "w": 24, "h": 1}, "panels": []}
+{%- endmacro %}
+
+{%- macro stat(id, title, expr, x, y, w=3, h=4, unit="short", desc="", spec=[["green", None]], decimals=None, no_value="No data", mappings=[], legend="", text_mode="value", color_mode="value", type="stat", min=None, max=None, extra=[]) -%}
+{
+  "id": {{ id }}, "type": {{ type | tojson }}, "title": {{ title | tojson }}, "description": {{ desc | tojson }},
+  "datasource": {{ ds | tojson }},
+  "gridPos": {"x": {{ x }}, "y": {{ y }}, "w": {{ w }}, "h": {{ h }}},
+  "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "orientation": "auto", "textMode": {{ text_mode | tojson }}, "colorMode": {{ color_mode | tojson }}, "graphMode": "none", "justifyMode": "auto", "showThresholdLabels": false, "showThresholdMarkers": true},
+  "fieldConfig": {"defaults": {"unit": {{ unit | tojson }}, "noValue": {{ no_value | tojson }}{% if decimals is not none %}, "decimals": {{ decimals }}{% endif %}{% if min is not none %}, "min": {{ min }}{% endif %}{% if max is not none %}, "max": {{ max }}{% endif %}, "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": {{ steps(spec) }}}, "mappings": {{ mappings | tojson }}}, "overrides": []},
+  "targets": {{ targets([{"expr": expr, "legend": legend}] + extra, instant=true) }}
+}
+{%- endmacro %}
+
+{%- macro ts(id, title, exprs, x, y, w=12, h=8, unit="short", desc="", no_value="No data", min=None, max=None, stack=false, overrides=[], decimals=None, draw="line") -%}
+{
+  "id": {{ id }}, "type": "timeseries", "title": {{ title | tojson }}, "description": {{ desc | tojson }},
+  "datasource": {{ ds | tojson }},
+  "gridPos": {"x": {{ x }}, "y": {{ y }}, "w": {{ w }}, "h": {{ h }}},
+  "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+  "fieldConfig": {"defaults": {"unit": {{ unit | tojson }}, "noValue": {{ no_value | tojson }}{% if decimals is not none %}, "decimals": {{ decimals }}{% endif %}{% if min is not none %}, "min": {{ min }}{% endif %}{% if max is not none %}, "max": {{ max }}{% endif %}, "custom": {"drawStyle": {{ draw | tojson }}, "lineWidth": 1, "fillOpacity": {{ 25 if stack else 10 }}, "showPoints": "never", "spanNulls": false, "stacking": {"mode": {{ ('normal' if stack else 'none') | tojson }}, "group": "A"}}}, "overrides": {{ overrides | tojson }}},
+  "targets": {{ targets(exprs) }}
+}
+{%- endmacro %}
+
+{%- macro table(id, title, exprs, x, y, w=24, h=8, desc="", no_value="No data", organize={}, overrides=[]) -%}
+{
+  "id": {{ id }}, "type": "table", "title": {{ title | tojson }}, "description": {{ desc | tojson }},
+  "datasource": {{ ds | tojson }},
+  "gridPos": {"x": {{ x }}, "y": {{ y }}, "w": {{ w }}, "h": {{ h }}},
+  "options": {"showHeader": true, "cellHeight": "sm"},
+  "fieldConfig": {"defaults": {"noValue": {{ no_value | tojson }}}, "overrides": {{ overrides | tojson }}},
+  "targets": {{ targets(exprs, instant=true, table=true) }},
+  "transformations": [{"id": "merge", "options": {}}, {"id": "organize", "options": {{ organize | tojson }}}]
+}
+{%- endmacro %}
+
+{%- macro text(id, title, content, x, y, w=24, h=4) -%}
+{
+  "id": {{ id }}, "type": "text", "title": {{ title | tojson }},
+  "gridPos": {"x": {{ x }}, "y": {{ y }}, "w": {{ w }}, "h": {{ h }}},
+  "options": {"mode": "markdown", "content": {{ content | tojson }}}
+}
+{%- endmacro %}
+
+{#- A reading the agent reports as collected (1) or unavailable (0) for every
+    node: macos_hardware_metric_available{metric=...} for hardware, or
+    omlx_kv_cache_metric_available{metric=...} for the OMLX KV-cache figures. -#}
+{%- macro availability(id, title, metric, reason, x, y, w=3, h=4, host_filter='host_name=~"$host"', series='macos_hardware_metric_available', no_value="No LLM telemetry") -%}
+{{ stat(id, title, 'min(' ~ series ~ '{metric="' ~ metric ~ '", ' ~ host_filter ~ '})', x, y, w=w, h=h,
+        desc=reason, no_value=no_value, spec=[["text", None]], text_mode="value",
+        mappings=[{"type": "value", "options": {"0": {"text": "Unavailable", "color": "text"}, "1": {"text": "Collected", "color": "green"}}}]) }}
+{%- endmacro %}
+
+{#- Shared value mappings. -#}
+{% set up_down = [{"type": "value", "options": {"0": {"text": "Down", "color": "red"}, "1": {"text": "Up", "color": "green"}}}] %}
+{% set pressure_map = [{"type": "value", "options": {"0": {"text": "Normal", "color": "green"}, "1": {"text": "Warning", "color": "orange"}, "2": {"text": "Critical", "color": "red"}}}] %}
+{% set thermal_map = [{"type": "value", "options": {"0": {"text": "Nominal", "color": "green"}, "1": {"text": "Fair", "color": "yellow"}, "2": {"text": "Serious", "color": "orange"}, "3": {"text": "Critical", "color": "red"}}}] %}
+
+{#- The $framework variable shared by the three LLM dashboards. mlx-lm /
+    mlx-vlm / unknown, from the agent's framework detection. Panels that show
+    a node's current framework read mlx_framework_info only from samples
+    newer than 90 s: after a framework change the old series would otherwise
+    stay in instant queries for VictoriaMetrics' 5-minute lookback. -#}
+{%- macro framework_var(host_filter) -%}
+{
+  "name": "framework", "label": "Framework", "type": "query",
+  "description": "Inference framework per node: mlx-lm or mlx-vlm (unknown = not detected). Series recorded before framework detection have no framework label and match only All.",
+  "datasource": {{ ds | tojson }},
+  "definition": {{ ('label_values(mlx_framework_info{' ~ host_filter ~ '}, framework)') | tojson }},
+  "query": {"qryType": 1, "query": {{ ('label_values(mlx_framework_info{' ~ host_filter ~ '}, framework)') | tojson }}, "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+  "refresh": 2, "regex": "", "sort": 1, "multi": true, "includeAll": true, "allValue": ".*",
+  "current": {"selected": true, "text": ["All"], "value": ["$__all"]}, "options": [], "hide": 0
+}
+{%- endmacro %}
+
+{#- Panels shared by the dashboards' KV-cache sections. Sources (label
+    source): "mlx-vlm" = MLX-VLM's prefix cache (/v1/cache/stats, polled on
+    MLX-VLM nodes), "omlx" = OMLX (/admin/api/stats, omlx_monitoring_enabled),
+    "mlx-lm" = MLX-LM's prompt cache read from its log (mlx_server_log_path).
+    H filters hosts. KV series carry the source's model ids, not the proxy's
+    model label, so they take H only. -#}
+{% set kv_state_map = [{"type": "value", "options": {"2": {"text": "Enabled", "color": "green"}, "1": {"text": "Disabled on server", "color": "text"}, "-1": {"text": "Poll failing", "color": "red"}}}] %}
+{%- macro kv_stats(first_id, x, y, H, w=4, h=4) -%}
+{{ stat(first_id, "KV cache", 'min(2 * mlx_kv_cache_source_up{' ~ H ~ '} - 1 + (mlx_kv_cache_enabled{' ~ H ~ '} or on (host_name, source) 0 * mlx_kv_cache_source_up{' ~ H ~ '}))', x, y, w=w, h=h, mappings=kv_state_map, spec=[["text", None]], color_mode="background",
+        desc="Worst state across selected nodes and sources. Enabled = the source reports its KV cache. Disabled on server = MLX-VLM runs without its prefix cache (APC_ENABLED=1 turns it on). Poll failing = MLX-VLM /v1/cache/stats or OMLX /admin/api/stats did not answer, or rejected the API key (mlx_kv_cache_scrape_failures_total{source, reason}); for MLX-LM (source mlx-lm, read from its log with mlx_server_log_path) the log file could not be read.", no_value="No KV-cache source") }},
+{{ stat(first_id + 1, "Hot KV cache used", 'sum(mlx_kv_cache_used_bytes{tier="hot", ' ~ H ~ '})', x + w, y, w=w, h=h, unit="bytes", decimals=1,
+        desc="In-memory KV cache held, summed over sources, models and selected nodes. MLX-LM: prompt cache from its log (10 MB resolution, as of the latest request); MLX-VLM: prefix-cache resident bytes; OMLX: hot tier size.", no_value="Not reported") }},
+{{ stat(first_id + 2, "Hot KV cache capacity", 'sum(mlx_kv_cache_capacity_bytes{tier="hot", ' ~ H ~ '})', x + 2 * w, y, w=w, h=h, unit="bytes", decimals=1,
+        desc="In-memory KV budget, summed over selected nodes. MLX-VLM: APC resident budget; OMLX: --hot-cache-max-size. Not reported when no budget is set.", no_value="Not reported") }},
+{{ stat(first_id + 3, "Hot KV cache utilisation", 'max(mlx_kv_cache_utilization_percent{tier="hot", ' ~ H ~ '})', x + 3 * w, y, w=w, h=h, unit="percent", decimals=1, spec=[["green", None], ["orange", 80], ["red", 95]],
+        desc="Hot tier used / capacity, highest across selected nodes and sources. Only computed when a capacity is reported.", no_value="Not reported") }},
+{{ stat(first_id + 4, "SSD KV cache used", 'sum(mlx_kv_cache_used_bytes{tier="ssd", ' ~ H ~ '})', x + 4 * w, y, w=w, h=h, unit="bytes", decimals=1,
+        desc="KV cache kept on disk (MLX-VLM APC disk tier, OMLX paged SSD tier), summed over selected nodes.", no_value="Not reported") }},
+{{ stat(first_id + 5, "SSD KV cache utilisation", 'max(mlx_kv_cache_utilization_percent{tier="ssd", ' ~ H ~ '})', x + 5 * w, y, w=w, h=h, unit="percent", decimals=1, spec=[["green", None], ["orange", 80], ["red", 95]],
+        desc="SSD tier used / its size limit, highest across selected nodes. Not reported for an uncapped disk tier.", no_value="Not reported") }}
+{%- endmacro %}
+
+{%- macro kv_timeseries(first_id, x, y, H, w=8, h=8) -%}
+{{ ts(first_id, "KV cache used vs capacity", [{"expr": 'sum by (source, tier) (mlx_kv_cache_used_bytes{' ~ H ~ '})', "legend": lg('source') ~ " " ~ lg('tier') ~ " used"}, {"expr": 'sum by (source, tier) (mlx_kv_cache_capacity_bytes{' ~ H ~ '})', "legend": lg('source') ~ " " ~ lg('tier') ~ " capacity"}], x, y, w=w, h=h, unit="bytes", min=0,
+      desc="KV cache per source and tier: hot = memory, ssd = disk. Neither source reports a separate 'allocated' figure: the hot tier's size is the memory it holds.", no_value="No KV-cache source reporting") }},
+{{ ts(first_id + 1, "KV cache utilisation", [{"expr": 'max by (host_name, source, tier) (mlx_kv_cache_utilization_percent{' ~ H ~ '})', "legend": lg('host_name') ~ " " ~ lg('source') ~ " " ~ lg('tier')}, {"expr": 'max by (host_name, source) (100 * mlx_kv_cache_entries{tier="hot", ' ~ H ~ '} / on (host_name, source, tier) group_left max by (host_name, source, tier) (mlx_kv_cache_entries_capacity{tier="hot", ' ~ H ~ '}))', "legend": lg('host_name') ~ " " ~ lg('source') ~ " block pool"}], x + w, y, w=w, h=h, unit="percent", min=0, max=100,
+      desc="Used / capacity per node, source and tier, and (MLX-VLM) prefix-cache blocks in use / block pool size. Computed by the telemetry agent from the source's own figures.", no_value="No KV-cache source reporting") }},
+{{ ts(first_id + 2, "KV cache hit ratio and evictions", [{"expr": '100 * sum by (source) (rate(mlx_kv_cache_lookups_total{result="hit", ' ~ H ~ '}[$__rate_interval])) / (sum by (source) (rate(mlx_kv_cache_lookups_total{' ~ H ~ '}[$__rate_interval])) > 0)', "legend": "hit % " ~ lg('source')}, {"expr": 'sum by (source, tier) (rate(mlx_kv_cache_evictions_total{' ~ H ~ '}[$__rate_interval])) * 60', "legend": "evictions/min " ~ lg('source') ~ " " ~ lg('tier')}], x + 2 * w, y, w=w, h=h, unit="percent", min=0,
+      desc="Share of KV-cache lookups served from the cache, and blocks evicted per minute, per source. The sources' own counters, reset when the server restarts.", no_value="No lookups or no KV-cache source",
+      overrides=[{"matcher": {"id": "byRegexp", "options": "evictions.*"}, "properties": [{"id": "unit", "value": "short"}, {"id": "custom.axisPlacement", "value": "right"}]}]) }}
+{%- endmacro %}
+
+{#- One node's framework, from live samples only, for joining onto host-level
+    series (CPU, memory) to compare frameworks. -#}
+{%- macro fw_join(host_filter) -%}
+ * on (host_name) group_left (framework) max by (host_name, framework) (mlx_framework_info{ {{- host_filter -}}, framework=~"$framework"} and (time() - timestamp(mlx_framework_info{ {{- host_filter -}} })) < 90)
+{%- endmacro %}
+
+{#- Header shared by every provisioned dashboard: a "Dashboards" dropdown of
+    everything tagged "observability", plus explicit links. -#}
+{%- macro nav(links=[]) -%}
+[{"type": "dashboards", "title": "Dashboards", "tags": ["observability"], "asDropdown": true, "includeVars": false, "keepTime": true, "targetBlank": false, "icon": "external link", "url": "", "tooltip": ""}{% for l in links %}, {"type": "link", "title": {{ l.title | tojson }}, "url": {{ l.url | tojson }}, "icon": "dashboard", "includeVars": {{ (l.vars | default(false)) | tojson }}, "keepTime": true, "targetBlank": false, "asDropdown": false, "tags": [], "tooltip": {{ (l.tooltip | default('')) | tojson }}}{% endfor %}]
+{%- endmacro %}
+
+{%- macro bargauge(id, title, exprs, x, y, w=12, h=8, unit="short", desc="", no_value="No data", spec=[["green", None]], min=None, max=None, instant=true, decimals=None) -%}
+{
+  "id": {{ id }}, "type": "bargauge", "title": {{ title | tojson }}, "description": {{ desc | tojson }},
+  "datasource": {{ ds | tojson }},
+  "gridPos": {"x": {{ x }}, "y": {{ y }}, "w": {{ w }}, "h": {{ h }}},
+  "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "orientation": "horizontal", "displayMode": "gradient", "showUnfilled": true, "valueMode": "color", "namePlacement": "auto", "sizing": "auto", "minVizHeight": 16, "maxVizHeight": 300},
+  "fieldConfig": {"defaults": {"unit": {{ unit | tojson }}, "noValue": {{ no_value | tojson }}{% if decimals is not none %}, "decimals": {{ decimals }}{% endif %}{% if min is not none %}, "min": {{ min }}{% endif %}{% if max is not none %}, "max": {{ max }}{% endif %}, "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": {{ steps(spec) }}}}, "overrides": []},
+  "targets": {{ targets(exprs, instant=instant) }}
+}
+{%- endmacro %}
+
+{#- Grafana-managed alert rules (all provisioned rule files), live state. -#}
+{%- macro alertlist(id, title, x, y, w=12, h=8, states={"firing": true, "pending": true}, group_mode="default", max_items=50, folder="", desc="") -%}
+{
+  "id": {{ id }}, "type": "alertlist", "title": {{ title | tojson }}, "description": {{ desc | tojson }},
+  "gridPos": {"x": {{ x }}, "y": {{ y }}, "w": {{ w }}, "h": {{ h }}},
+  "options": {"viewMode": "list", "groupMode": {{ group_mode | tojson }}, "groupBy": [], "maxItems": {{ max_items }}, "sortOrder": 1, "dashboardAlerts": false, "alertName": "", "alertInstanceLabelFilter": "", "showInactiveAlerts": false, "folder": {{ ({"title": folder} if folder else none) | tojson }},
+              "stateFilter": {"firing": {{ states.get('firing', false) | tojson }}, "pending": {{ states.get('pending', false) | tojson }}, "noData": {{ states.get('noData', false) | tojson }}, "normal": {{ states.get('normal', false) | tojson }}, "error": {{ states.get('error', true) | tojson }}, "inactive": {{ states.get('inactive', false) | tojson }}, "recovering": {{ states.get('recovering', false) | tojson }}}}
+}
+{%- endmacro %}
+
+{%- macro dashlist(id, title, x, y, w=12, h=8, tags=["observability"], query="", desc="") -%}
+{
+  "id": {{ id }}, "type": "dashlist", "title": {{ title | tojson }}, "description": {{ desc | tojson }},
+  "gridPos": {"x": {{ x }}, "y": {{ y }}, "w": {{ w }}, "h": {{ h }}},
+  "options": {"showStarred": false, "showRecentlyViewed": false, "showSearch": true, "showHeadings": true, "showFolderNames": true, "includeVars": false, "keepTime": true, "maxItems": 30, "query": {{ query | tojson }}, "tags": {{ tags | tojson }}}
+}
+{%- endmacro %}
+
+{%- macro query_var(name, label, query, desc="", multi=true, all_value=".*") -%}
+{
+  "name": {{ name | tojson }}, "label": {{ label | tojson }}, "type": "query", "description": {{ desc | tojson }},
+  "datasource": {{ ds | tojson }},
+  "definition": {{ query | tojson }},
+  "query": {"qryType": 1, "query": {{ query | tojson }}, "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+  "refresh": 2, "regex": "", "sort": 1, "multi": {{ multi | tojson }}, "includeAll": {{ multi | tojson }}, "allValue": {{ (all_value if multi else none) | tojson }},
+  "current": {{ ({"selected": true, "text": ["All"], "value": ["$__all"]} if multi else {}) | tojson }}, "options": [], "hide": 0
+}
+{%- endmacro %}
+
+{#- Dashboard header fields shared by every provisioned dashboard. -#}
+{%- macro header(uid, title, desc, tags, links=[], refresh="30s", time_from="now-6h") -%}
+  "uid": {{ uid | tojson }},
+  "title": {{ title | tojson }},
+  "description": {{ desc | tojson }},
+  "tags": {{ (["observability"] + tags) | tojson }},
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": {{ refresh | tojson }},
+  "time": {"from": {{ time_from | tojson }}, "to": "now"},
+  "links": {{ nav(links) }}
+{%- endmacro %}

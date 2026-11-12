@@ -108,6 +108,30 @@ llm_model_name: ""
 # 0 = read max_position_embeddings from the model's config.json when found.
 llm_model_max_context_tokens: 0
 llm_model_label_max_values: 10
+# Tool (function) names become a label on mlx_tool_calls_by_tool_total. They
+# come from the model's output, so they are sanitised and capped: names past
+# this many distinct values are counted as "other".
+llm_tool_label_max_values: 50
+
+# Optional token confidence from the logprobs of the sampled tokens: mean and
+# lowest token probability, perplexity, share of low-probability tokens. A
+# measure of how sure the model was, not of whether it was right.
+# Responses are scored when the client asked for logprobs. With
+# llm_confidence_inject_logprobs, the proxy also asks MLX-LM for them on
+# non-streaming requests and strips them from the reply (byte-identical to the
+# reply without them). MLX-LM returns no logprobs on streams, so streaming
+# requests are never scored. Costs a little generation speed when injecting.
+llm_confidence_metrics_enabled: false
+llm_confidence_inject_logprobs: false
+llm_confidence_low_token_probability: 0.5
+llm_confidence_low_response_ratio: 0.2
+
+# Optional MLX-LM KV (prompt) cache figures. mlx_lm.server has no stats API,
+# but logs "Prompt Cache: <n> sequences, <x> GB" before each request. Set this
+# to the file its stderr goes to (e.g. the StandardErrorPath of its
+# LaunchAgent) and the agent reports those figures as source="mlx-lm". Only
+# those lines are read. The file must be readable by the deployment user.
+mlx_server_log_path: ""
 
 # Optional KV-cache figures from an OMLX server on this Mac (OMLX is not
 # installed or managed here). The agent polls OMLX's admin stats,

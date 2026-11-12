@@ -21,12 +21,13 @@
   when: llm_metrics_enabled | bool
   tags: ['verify']
 
-# Forwarded unchanged, so this shows the proxy reaches MLX-LM.
-- name: Verify the proxy forwards to MLX-LM
+# Forwarded unchanged, so this shows the proxy reaches the server (401 from
+# an API-key-protected MLX-VLM is forwarded too).
+- name: Verify the proxy forwards to the inference server
   ansible.builtin.uri:
     url: "http://{{ '127.0.0.1' if mlx_telemetry_host in ['0.0.0.0', '::'] else mlx_telemetry_host }}:{{ mlx_telemetry_port }}/health"
     method: GET
-    status_code: 200
+    status_code: [200, 401]
   when: llm_metrics_enabled | bool and llm_require_mlx_reachable | bool
   tags: ['verify']
 
@@ -52,13 +53,26 @@
   no_log: "{{ victoriametrics_auth_enabled }}"
   tags: ['verify']
 
+# Read again: the first status answer can precede the agent's first health
+# tick, which is when the framework is detected.
+- name: Read the detected framework from the telemetry proxy
+  ansible.builtin.uri:
+    url: "http://{{ '127.0.0.1' if mlx_telemetry_host in ['0.0.0.0', '::'] else mlx_telemetry_host }}:{{ mlx_telemetry_port }}/-/mlx-telemetry/status"
+    method: GET
+    status_code: 200
+  register: observability_llm_status
+  when: llm_metrics_enabled | bool
+  tags: ['verify']
+
 - name: Report MLX telemetry verification success
   ansible.builtin.debug:
     msg: >-
       MLX telemetry is running as {{ mlx_telemetry_launchd_label }} in
       {{ launchd_domain }} and reaching VictoriaMetrics as host
-      {{ observability_llm_vm.json.data.result | map(attribute='metric.host_name') | join(', ') }}.
-      {% if llm_metrics_enabled | bool %}Point MLX-LM clients at
+      {{ observability_llm_vm.json.data.result | map(attribute='metric.host_name') | join(', ') }}
+      (framework {{ observability_llm_status.json.framework | default('n/a') }},
+      detected from {{ observability_llm_status.json.framework_source | default('n/a') }}).
+      {% if llm_metrics_enabled | bool %}Point clients at
       http://{{ mlx_telemetry_host }}:{{ mlx_telemetry_port }}/v1 to measure their
-      requests (MLX-LM itself stays on {{ mlx_server_host }}:{{ mlx_server_port }}).{% endif %}
+      requests (the server itself stays on {{ mlx_server_host }}:{{ mlx_server_port }}).{% endif %}
   tags: ['verify']

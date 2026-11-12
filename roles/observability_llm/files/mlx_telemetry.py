@@ -1,29 +1,34 @@
 #!/usr/bin/env python3
 # Managed by Ansible (roles/observability_llm). Local edits are overwritten.
-"""MLX-LM telemetry agent.
+"""MLX-LM / MLX-VLM telemetry agent.
 
-One long-running process, run as a per-user LaunchAgent, with up to four parts:
+One long-running process, run as a per-user LaunchAgent, with up to five parts:
 
-  proxy     An OpenAI-compatible reverse proxy in front of mlx_lm.server. Every
-            request is forwarded unchanged (streams stay streamed); the proxy
-            only observes timing, HTTP status and the "usage" block MLX-LM
-            returns. Clients must be pointed at the proxy to be measured.
-  health    Periodic checks of the MLX-LM process, /health, /v1/models and an
-            optional one-token inference probe.
+  proxy     An OpenAI-compatible reverse proxy in front of mlx_lm.server or
+            mlx_vlm.server (both speak the same API). Every request is
+            forwarded unchanged, images included (streams stay streamed); the
+            proxy only observes timing, HTTP status and the "usage" (and, from
+            MLX-VLM, "timings") blocks the server returns. Clients must be
+            pointed at the proxy to be measured.
+  health    Periodic checks of the server process, /health, /v1/models and an
+            optional one-token inference probe, plus framework detection
+            (inventory override, else the server answering on the port, else
+            the process found).
   hardware  Readings macOS exposes to an unprivileged user: GPU utilisation and
             GPU memory (IORegistry), memory pressure level (sysctl) and thermal
             state (NSProcessInfo). Readings that need root (power, GPU
             frequency) are reported as unavailable, never estimated.
   quality   Optional text heuristics (repetition, refusal, hedging) computed in
             memory from completed responses. Heuristics, not fact checking.
+  omlx      Optional KV-cache figures from an OMLX server's admin stats.
 
 Metrics are exported as OTLP/HTTP JSON (cumulative temporality) to the local
 OpenTelemetry Collector, which adds host.name and forwards them to
 VictoriaMetrics with the rest of the host's metrics.
 
-Privacy: prompts and completions are never logged, exported or written to
-disk. Metric labels are limited to bounded values (model, endpoint, stream,
-outcome, status code, check name).
+Privacy: prompts, completions and images are never logged, exported or
+written to disk. Metric labels are limited to bounded values (model,
+framework, endpoint, stream, outcome, status code, check name, cache tier).
 
 Python 3.9+ standard library only, so it runs on macOS's /usr/bin/python3.
 """
@@ -34,6 +39,7 @@ import ctypes.util
 import http.client
 import json
 import logging
+import math
 import os
 import re
 import signal
@@ -42,15 +48,23 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.0.0"
+VERSION = "1.3.0"
 LOG = logging.getLogger("mlx-telemetry")
 
 # --------------------------------------------------------------------------
 # Configuration
 # --------------------------------------------------------------------------
+
+FRAMEWORKS = ("mlx-lm", "mlx-vlm")
+# Default server patterns. They only count when the process's executable is a
+# Python interpreter or the server's own entry point (see _is_server_command),
+# so editors, log tails and greps mentioning the module name do not match.
+DEFAULT_LM_PATTERN = r"mlx_lm(\.server\b|\s+server\b|/server\.py\b)"
+DEFAULT_VLM_PATTERN = r"mlx_vlm(\.server\b|\s+server\b|/server(/__main__)?\.py\b)"
 
 DEFAULTS = {
     "upstream_host": "127.0.0.1",
@@ -82,8 +96,23 @@ DEFAULTS = {
     "model_label_max_values": 10,
     "hf_cache_dir": "",
     "mlx_launchagent_label": "",
-    "mlx_process_pattern": r"mlx_lm(\.server\b|\s+server\b|/server\.py\b)",
+    "mlx_process_pattern": DEFAULT_LM_PATTERN,
+    "mlx_vlm_process_pattern": DEFAULT_VLM_PATTERN,
+    "framework": "auto",
+    "upstream_api_key_file": "",
+    "omlx_enabled": False,
+    "omlx_url": "http://127.0.0.1:8000",
+    "omlx_api_key_file": "",
+    "omlx_poll_interval_seconds": 30,
+    "omlx_timeout_seconds": 5,
+    "vlm_cache_stats_enabled": True,
     "activity_expected": False,
+    "tool_label_max_values": 50,
+    "confidence_metrics_enabled": False,
+    "confidence_inject_logprobs": False,
+    "confidence_low_token_probability": 0.5,
+    "confidence_low_response_ratio": 0.2,
+    "server_log_path": "",
     "buckets": {
         "request_duration": [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300],
         "time_to_first_token": [0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30],
@@ -92,6 +121,8 @@ DEFAULTS = {
         "tokens": [16, 64, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072],
         "ratio": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
         "temperature": [0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0, 1.2, 1.5, 2.0],
+        "probability": [0.3, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.98, 0.99, 1.0],
+        "perplexity": [1, 1.05, 1.1, 1.25, 1.5, 2, 3, 5, 10, 20, 50, 100],
     },
 }
 
@@ -114,7 +145,17 @@ _TYPES = {
     "quality_risk_weights": dict, "model_name": str, "model_path": str,
     "model_max_context_tokens": int, "model_label_max_values": int,
     "hf_cache_dir": str, "mlx_launchagent_label": str,
-    "mlx_process_pattern": str, "activity_expected": bool, "buckets": dict,
+    "mlx_process_pattern": str, "mlx_vlm_process_pattern": str,
+    "framework": str, "upstream_api_key_file": str, "omlx_enabled": bool,
+    "omlx_url": str, "omlx_api_key_file": str,
+    "omlx_poll_interval_seconds": (int, float), "omlx_timeout_seconds": (int, float),
+    "vlm_cache_stats_enabled": bool,
+    "activity_expected": bool, "buckets": dict,
+    "tool_label_max_values": int, "confidence_metrics_enabled": bool,
+    "confidence_inject_logprobs": bool,
+    "confidence_low_token_probability": (int, float),
+    "confidence_low_response_ratio": (int, float),
+    "server_log_path": str,
 }
 
 
@@ -148,9 +189,19 @@ def load_config(path):
     for key in ("export_interval_seconds", "health_check_interval_seconds",
                 "models_check_interval_seconds", "inference_probe_interval_seconds",
                 "hardware_interval_seconds", "proxy_read_timeout_seconds",
-                "proxy_connect_timeout_seconds"):
+                "proxy_connect_timeout_seconds", "omlx_poll_interval_seconds",
+                "omlx_timeout_seconds"):
         if cfg[key] <= 0:
             problems.append("%s must be positive" % key)
+    for key in ("confidence_low_token_probability", "confidence_low_response_ratio"):
+        if not 0 < cfg[key] <= 1:
+            problems.append("%s must be in (0, 1]" % key)
+    if cfg["tool_label_max_values"] < 1:
+        problems.append("tool_label_max_values must be at least 1")
+    if cfg["framework"] not in ("auto",) + FRAMEWORKS:
+        problems.append("framework must be one of auto, %s" % ", ".join(FRAMEWORKS))
+    if not cfg["omlx_url"].startswith(("http://", "https://")):
+        problems.append("omlx_url must be an http:// or https:// URL")
     if cfg["proxy_enabled"] and (cfg["proxy_host"], cfg["proxy_port"]) == (cfg["upstream_host"], cfg["upstream_port"]):
         problems.append("the proxy cannot listen on the MLX-LM server's own address")
     if not cfg["otlp_endpoint"].startswith("http://"):
@@ -159,10 +210,11 @@ def load_config(path):
         if not (isinstance(bounds, list) and bounds and all(isinstance(b, (int, float)) and not isinstance(b, bool) for b in bounds)
                 and bounds == sorted(set(bounds))):
             problems.append("buckets.%s must be a strictly increasing list of numbers" % name)
-    try:
-        re.compile(cfg["mlx_process_pattern"])
-    except re.error as exc:
-        problems.append("mlx_process_pattern is not a valid regex: %s" % exc)
+    for key in ("mlx_process_pattern", "mlx_vlm_process_pattern"):
+        try:
+            re.compile(cfg[key])
+        except re.error as exc:
+            problems.append("%s is not a valid regex: %s" % (key, exc))
     if problems:
         raise ValueError("; ".join(problems))
     return cfg
@@ -206,6 +258,40 @@ class Counter:
                  "timeUnixNano": str(now_ns), "asDouble": float(v)} for k, v in items]
 
 
+class ObservedCounter(Counter):
+    """A cumulative counter kept by another process (OMLX, MLX-VLM) and copied here.
+    When the value drops, that process restarted, so the series gets a new
+    start time and VictoriaMetrics treats it as a counter reset."""
+
+    def __init__(self, name, unit, description):
+        Counter.__init__(self, name, unit, description)
+        self._starts = {}
+
+    def observe_total(self, value, start_ns, **labels):
+        if value is None or value < 0:
+            return
+        key = tuple(sorted(labels.items()))
+        with self._lock:
+            if key not in self._values or value < self._values[key]:
+                self._starts[key] = start_ns
+            self._values[key] = value
+
+    def retain(self, source, models):
+        """Drop this source's series whose model is not in models (unloaded
+        models; an empty set drops them all). Other sources are untouched."""
+        with self._lock:
+            for key in [k for k in self._values
+                        if dict(k).get("source") == source and dict(k).get("model") not in models]:
+                del self._values[key]
+                self._starts.pop(key, None)
+
+    def points(self, start_ns, now_ns):
+        with self._lock:
+            items = [(k, v, self._starts.get(k, start_ns)) for k, v in self._values.items()]
+        return [{"attributes": _attrs(k), "startTimeUnixNano": str(s),
+                 "timeUnixNano": str(now_ns), "asDouble": float(v)} for k, v, s in items]
+
+
 class Gauge:
     kind = "gauge"
 
@@ -222,10 +308,23 @@ class Gauge:
             else:
                 self._values[key] = float(value)
 
-    def replace(self, series):
-        """Replace every series at once: [(value, {labels})]. Drops ones not listed."""
+    def replace(self, series, source=None):
+        """Replace every series at once: [(value, {labels})]. Drops ones not
+        listed. With source, only that source's series are replaced, so two
+        KV-cache sources can share one gauge."""
+        new = {tuple(sorted(labels.items())): float(value) for value, labels in series}
         with self._lock:
-            self._values = {tuple(sorted(labels.items())): float(value) for value, labels in series}
+            if source is not None:
+                kept = {k: v for k, v in self._values.items() if dict(k).get("source") != source}
+                kept.update(new)
+                new = kept
+            self._values = new
+
+    def relabel(self, label, value):
+        """Set `label` to value on every series (the node's framework changed)."""
+        with self._lock:
+            self._values = {tuple(sorted(dict(k, **{label: value}).items())): v
+                            for k, v in ((dict(k), v) for k, v in self._values.items())}
 
     def points(self, start_ns, now_ns):
         with self._lock:
@@ -324,11 +423,11 @@ class Metrics:
         # Requests through the proxy.
         self.requests = r.counter("mlx.requests", "{request}", "Inference requests handled by the proxy")
         self.active = r.gauge("mlx.requests.active", "{request}", "Inference requests currently in flight through the proxy")
-        self.usage_missing = r.counter("mlx.requests.usage_missing", "{request}", "Successful requests whose token usage MLX-LM did not report")
+        self.usage_missing = r.counter("mlx.requests.usage_missing", "{request}", "Successful requests whose token usage the server did not report")
         self.passthrough = r.counter("mlx.proxy.passthrough_requests", "{request}", "Non-inference requests forwarded unmeasured (e.g. /v1/models)")
         self.upstream_failures = r.counter("mlx.upstream.connection_failures", "{failure}", "Proxy could not reach or read from MLX-LM")
         self.request_duration = r.histogram("mlx.request.duration", "s", "End-to-end request duration seen by the proxy", b["request_duration"])
-        self.ttft = r.histogram("mlx.time_to_first_token", "s", "Streaming only: request start to first generated content event", b["time_to_first_token"])
+        self.ttft = r.histogram("mlx.time_to_first_token", "s", "Streaming only: request start to first SSE event carrying generated content", b["time_to_first_token"])
         self.generation_duration = r.histogram("mlx.generation.duration", "s", "Streaming only: first generated content to end of stream", b["generation_duration"])
         self.tokens_per_second = r.histogram("mlx.completion.tokens_per_second", "", "Streaming only: (completion_tokens - 1) / generation duration", b["tokens_per_second"])
         self.prompt_tokens = r.counter("mlx.tokens.prompt", "{token}", "Prompt tokens reported by MLX-LM usage")
@@ -340,6 +439,15 @@ class Metrics:
         self.context_utilization = r.histogram("mlx.request.context_utilization", "", "Context tokens / model maximum context length, per request", b["ratio"])
         self.temperature = r.histogram("mlx.request.temperature", "", "Sampling temperature explicitly set by the client", b["temperature"])
         self.tool_calls = r.counter("mlx.tool_calls", "{call}", "Tool calls returned by MLX-LM")
+        self.tool_calls_by_tool = r.counter("mlx.tool_calls.by_tool", "{call}", "Tool calls per function name (sanitised, capped by tool_label_max_values; the rest are 'other')")
+        self.responses = r.counter("mlx.responses", "{response}", "Successful responses by kind (chat, reasoning, tool_call, completion) and finish_reason")
+        # Optional token confidence from the sampled tokens' logprobs.
+        self.c_scored = r.counter("mlx.confidence.scored", "{response}", "Responses scored from token logprobs, by source (client = the client asked for logprobs, injected = the proxy asked)")
+        self.c_low = r.counter("mlx.confidence.low_confidence_responses", "{response}", "Scored responses whose share of low-probability tokens reached confidence_low_response_ratio")
+        self.c_mean = r.histogram("mlx.confidence.mean_token_probability", "", "Mean probability of the sampled tokens per response", b["probability"])
+        self.c_min = r.histogram("mlx.confidence.min_token_probability", "", "Probability of the least likely sampled token per response", b["probability"])
+        self.c_ppl = r.histogram("mlx.confidence.perplexity", "", "exp(-mean token logprob) per response; 1 = fully certain", b["perplexity"])
+        self.c_low_ratio = r.histogram("mlx.confidence.low_token_ratio", "", "Share of sampled tokens below confidence_low_token_probability per response", b["ratio"])
         self.last_success = r.gauge("mlx.request.last_success_timestamp", "s", "Unix time of the last successful inference request")
         # Server and process health.
         self.server_up = r.gauge("mlx.server.up", "", "1 if MLX-LM /health answered 200 at the last check")
@@ -353,10 +461,36 @@ class Metrics:
         self.process_rss = r.gauge("mlx.process.memory.rss", "By", "Resident set size of the MLX-LM server process (excludes most Metal/GPU buffers)")
         self.process_footprint = r.gauge("mlx.process.memory.footprint", "By", "Physical footprint of the MLX-LM process incl. Metal buffers (top MEM)")
         self.process_cpu = r.gauge("mlx.process.cpu.utilization", "%", "CPU of the MLX-LM process as reported by ps (100 = one core)")
-        self.process_restarts = r.counter("mlx.process.restarts", "{restart}", "Observed changes of the MLX-LM server pid")
+        self.process_restarts = r.counter("mlx.process.restarts", "{restart}", "Observed changes of the server pid")
+        self.process_uptime = r.gauge("mlx.process.uptime", "s", "Elapsed time since the server process started (ps etime)")
+        self.framework_processes = r.gauge("mlx.framework.processes", "{process}", "Server processes found per framework (both frameworks always reported)")
         self.launchd_runs = r.gauge("mlx.process.launchd_runs", "{run}", "launchd 'runs' count for the MLX-LM LaunchAgent (mlx_launchagent_label)")
         self.model_info = r.gauge("mlx.model.info", "", "Model served, value always 1")
         self.model_max_context = r.gauge("mlx.model.context_length.max", "{token}", "Maximum context length from the model config or llm_model_max_context_tokens")
+        self.model_config = r.gauge("mlx.model.config", "", "Architecture figures from the model's config.json, per attr (layers, attention_heads, kv_heads, head_dim, hidden_size, intermediate_size, vocab_size, quant_bits, quant_group_size)")
+        self.model_arch = r.gauge("mlx.model.architecture", "", "Model architecture and type from config.json, value always 1")
+        self.model_kv_per_token = r.gauge("mlx.model.kv_cache.per_token", "By", "Estimated KV-cache bytes per token: 2 x layers x kv_heads x head_dim x 2 bytes (fp16, full attention)")
+        self.model_weights = r.gauge("mlx.model.weights.size", "By", "Size of the model's weight files (*.safetensors) on disk")
+        self.framework_info = r.gauge("mlx.framework.info", "", "Inference framework on this node (mlx-lm, mlx-vlm or unknown) and how it was detected, value always 1")
+        # Timings the server itself reports in its response (MLX-VLM "timings"); MLX-LM sends none.
+        self.server_tps = r.histogram("mlx.server_reported.tokens_per_second", "", "Generation rate the server reports per request (timings.predicted_per_second)", b["tokens_per_second"])
+        self.server_prompt_duration = r.histogram("mlx.server_reported.prompt_duration", "s", "Prompt processing time the server reports per request (timings.prompt_ms)", b["time_to_first_token"])
+        # KV cache, labelled by source: "mlx-vlm" (MLX-VLM's prefix cache,
+        # GET /v1/cache/stats) or "omlx" (optional, GET <omlx_url>/admin/api/stats).
+        self.kv_up = r.gauge("mlx.kv_cache.source.up", "", "1 if the last poll of this KV-cache source succeeded")
+        self.kv_enabled = r.gauge("mlx.kv_cache.enabled", "", "1 if the source reports its KV cache as enabled")
+        self.kv_failures = r.counter("mlx.kv_cache.scrape.failures", "{poll}", "Failed KV-cache stats polls, per source and reason")
+        self.kv_available = r.gauge("mlx.kv_cache.metric.available", "", "1 if the source reports this KV-cache figure, 0 if it does not")
+        self.kv_used = r.gauge("mlx.kv_cache.used", "By", "KV cache held per source, tier (hot = memory, ssd = disk) and model")
+        self.kv_capacity = r.gauge("mlx.kv_cache.capacity", "By", "KV cache budget per source and tier")
+        self.kv_utilization = r.gauge("mlx.kv_cache.utilization", "%", "KV cache used / capacity per source and tier, only when a capacity is reported")
+        self.kv_entries = r.gauge("mlx.kv_cache.entries", "{entry}", "KV cache blocks held per source, tier and model")
+        self.kv_entries_capacity = r.gauge("mlx.kv_cache.entries.capacity", "{entry}", "Block pool size per source and tier, where the source reports one")
+        self.kv_lookups = ObservedCounter("mlx.kv_cache.lookups", "{lookup}", "KV cache lookups by result (hit/miss), the source's own counters since it started")
+        self.kv_hot_hits = ObservedCounter("mlx.kv_cache.hot_hits", "{lookup}", "OMLX: lookups served from the in-memory hot tier (a subset of hits)")
+        self.kv_evictions = ObservedCounter("mlx.kv_cache.evictions", "{block}", "KV cache blocks evicted per source and tier")
+        for metric in (self.kv_lookups, self.kv_hot_hits, self.kv_evictions):
+            r._add(metric)
         # Hardware (unprivileged sources only).
         self.hw_available = r.gauge("macos.hardware.metric.available", "", "1 if this hardware reading is collected on this node, 0 if unavailable")
         self.gpu_util = r.gauge("macos.gpu.utilization", "%", "GPU device utilisation (IORegistry PerformanceStatistics)")
@@ -400,6 +534,21 @@ class State:
         self.served_model_source = "config" if self.served_model else ""
         self.known_models = set()
         self.seen_labels = set()
+        self.seen_tools = set()
+        # Set by Health on every tick; read by the proxy for the framework label.
+        self.framework = cfg["framework"] if cfg["framework"] in FRAMEWORKS else "unknown"
+        self.framework_source = "config" if cfg["framework"] in FRAMEWORKS else "none"
+
+    def tool_label(self, name):
+        """Bounded tool label: sanitised function name, capped by
+        tool_label_max_values (later new names become 'other')."""
+        label = re.sub(r"[^A-Za-z0-9._:-]", "_", name.strip())[:64] if isinstance(name, str) and name.strip() else "unknown"
+        with self.lock:
+            if label not in self.seen_tools:
+                if len(self.seen_tools) >= self.cfg["tool_label_max_values"]:
+                    return "other"
+                self.seen_tools.add(label)
+        return label
 
     def model_label(self, requested):
         cfg = self.cfg
@@ -465,7 +614,9 @@ def score_quality(text, cfg):
 _HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
                "trailer", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
                "accept-encoding", "proxy-connection"}
-_INSTRUMENTED = {"/v1/chat/completions": "chat", "/v1/completions": "completion"}
+# /chat/completions without /v1 is MLX-VLM's primary route; MLX-LM serves it too.
+_INSTRUMENTED = {"/v1/chat/completions": "chat", "/chat/completions": "chat",
+                 "/v1/completions": "completion"}
 STATUS_PATH = "/-/mlx-telemetry/status"
 
 
@@ -567,7 +718,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
             cfg = self.cfg
             self._send_json(200, {"agent": "mlx-telemetry", "version": VERSION,
                                   "upstream": "%s:%s" % (cfg["upstream_host"], cfg["upstream_port"]),
-                                  "served_model": self.state.served_model or None})
+                                  "served_model": self.state.served_model or None,
+                                  "framework": self.state.framework,
+                                  "framework_source": self.state.framework_source})
             return
         body = self._read_body()
         if body is False:
@@ -585,11 +738,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
         try:
             conn, resp = self._open_upstream(body, self._upstream_headers())
         except socket.timeout:
-            m.upstream_failures.add(1, reason="timeout")
+            m.upstream_failures.add(1, reason="timeout", framework=self.state.framework)
             self._send_json(504, {"error": "MLX-LM server timed out"})
             return
         except OSError:
-            m.upstream_failures.add(1, reason="connect")
+            m.upstream_failures.add(1, reason="connect", framework=self.state.framework)
             self._send_json(502, {"error": "MLX-LM server unavailable"})
             return
         try:
@@ -604,7 +757,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         except _ClientGone:
             self.close_connection = True
         except (socket.timeout, OSError):
-            m.upstream_failures.add(1, reason="read")
+            m.upstream_failures.add(1, reason="read", framework=self.state.framework)
             self.close_connection = True
         finally:
             conn.close()
@@ -625,26 +778,40 @@ class ProxyHandler(BaseHTTPRequestHandler):
             req["stream_options"] = {"include_usage": True}
             body = json.dumps(req).encode()
             injected = True
+        framework = state.framework
+        # Optional: ask MLX-LM for the sampled tokens' logprobs on non-streaming
+        # requests and strip them from the reply. MLX-LM serialises with
+        # json.dumps defaults, so the stripped reply is byte-identical to the
+        # one it sends without logprobs. Only MLX-LM, whose format is known.
+        strip_logprobs = False
+        if (req is not None and not stream and cfg["confidence_metrics_enabled"]
+                and cfg["confidence_inject_logprobs"] and framework == "mlx-lm"
+                and "logprobs" not in req and "top_logprobs" not in req):
+            req["logprobs"] = True
+            body = json.dumps(req).encode()
+            strip_logprobs = True
         temperature = req.get("temperature") if req else None
         if isinstance(temperature, (int, float)) and not isinstance(temperature, bool):
-            m.temperature.observe(float(temperature), model=model)
+            m.temperature.observe(float(temperature), model=model, framework=framework)
 
-        result = {"status": 0, "outcome": "success", "usage": None, "t_first": None,
+        result = {"status": 0, "outcome": "success", "usage": None, "timings": None, "t_first": None,
                   "t_end": None, "tool_calls": 0, "text": [] if cfg["quality_metrics_enabled"] else None,
-                  "text_len": 0}
-        labels = {"model": model, "endpoint": endpoint, "stream": "true" if stream else "false"}
-        m.active.set(self._active_delta(1))
+                  "text_len": 0, "finish_reason": None, "reasoning": False, "tool_names": [],
+                  "logprobs": None, "logprobs_source": None, "strip_logprobs": strip_logprobs}
+        labels = {"model": model, "endpoint": endpoint, "stream": "true" if stream else "false",
+                  "framework": framework}
+        self._set_active(m, state, 1)
         conn = None
         try:
             try:
                 conn, resp = self._open_upstream(body, self._upstream_headers())
             except socket.timeout:
-                m.upstream_failures.add(1, reason="timeout")
+                m.upstream_failures.add(1, reason="timeout", framework=self.state.framework)
                 result.update(status=504, outcome="timeout")
                 self._send_json(504, {"error": "MLX-LM server timed out"})
                 return
             except OSError:
-                m.upstream_failures.add(1, reason="connect")
+                m.upstream_failures.add(1, reason="connect", framework=self.state.framework)
                 result.update(status=502, outcome="upstream_error")
                 self._send_json(502, {"error": "MLX-LM server unavailable"})
                 return
@@ -653,14 +820,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if resp.status == 200 and "text/event-stream" in ctype:
                 self._relay_stream(resp, result, injected)
             else:
-                self._relay_whole(resp, result, stream)
+                self._relay_whole(resp, result)
         except _ClientGone:
             result["outcome"] = "client_disconnected"
             self.close_connection = True
         finally:
             if conn is not None:
                 conn.close()
-            m.active.set(self._active_delta(-1))
+            self._set_active(m, state, -1)
             self._record(t0, labels, result)
 
     _active = 0
@@ -672,19 +839,36 @@ class ProxyHandler(BaseHTTPRequestHandler):
             cls._active += delta
             return cls._active
 
-    def _relay_whole(self, resp, result, stream):
+    @classmethod
+    def _set_active(cls, metrics, state, delta):
+        # One series, labelled with the node's current framework.
+        metrics.active.replace([(cls._active_delta(delta), {"framework": state.framework})])
+
+    def _relay_whole(self, resp, result):
         try:
             data = resp.read()
         except socket.timeout:
-            self.metrics.upstream_failures.add(1, reason="timeout")
+            self.metrics.upstream_failures.add(1, reason="timeout", framework=self.state.framework)
             result.update(status=504, outcome="timeout")
             self._send_json(504, {"error": "MLX-LM server timed out"})
             return
         except OSError:
-            self.metrics.upstream_failures.add(1, reason="read")
+            self.metrics.upstream_failures.add(1, reason="read", framework=self.state.framework)
             result.update(status=502, outcome="upstream_error")
             self._send_json(502, {"error": "MLX-LM server connection failed"})
             return
+        obj = None
+        if resp.status == 200:
+            try:
+                obj = json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                obj = None
+        if isinstance(obj, dict):
+            self._observe_whole(obj, result)
+            if result["strip_logprobs"] and result["logprobs"] is not None:
+                # The client did not ask for logprobs: hand back the reply
+                # exactly as the server would have sent it without them.
+                data = json.dumps(obj).encode()
         self._relay_headers(resp, close=False)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -694,22 +878,49 @@ class ProxyHandler(BaseHTTPRequestHandler):
             result["outcome"] = "server_error"
         elif resp.status >= 400:
             result["outcome"] = "client_error"
-        if resp.status != 200:
+
+    def _observe_whole(self, obj, result):
+        result["usage"] = obj.get("usage") if isinstance(obj.get("usage"), dict) else None
+        self._collect_timings(result, obj.get("timings"))
+        for choice in obj.get("choices") or []:
+            if not isinstance(choice, dict):
+                continue
+            self._collect_finish(result, choice)
+            message = choice.get("message") or {}
+            if isinstance(message, dict):
+                self._collect_tools(result, message.get("tool_calls"), streaming=False)
+                self._collect_text(result, message.get("content"))
+                if message.get("reasoning") or message.get("reasoning_content"):
+                    result["reasoning"] = True
+            self._collect_text(result, choice.get("text"))
+            if "logprobs" in choice:
+                logprobs = choice.pop("logprobs") if result["strip_logprobs"] else choice.get("logprobs")
+                if result["logprobs"] is None:
+                    result["logprobs"] = _sampled_logprobs(logprobs, self.state.framework)
+                    result["logprobs_source"] = "injected" if result["strip_logprobs"] else "client"
+
+    @staticmethod
+    def _collect_finish(result, choice):
+        reason = choice.get("finish_reason")
+        if isinstance(reason, str) and reason:
+            result["finish_reason"] = reason
+
+    @staticmethod
+    def _collect_tools(result, tools, streaming):
+        """Count tool calls and keep their function names. Streaming servers
+        that split one call over several deltas send the name (and id) only
+        in the first fragment, so only fragments carrying one are counted."""
+        if not isinstance(tools, list):
             return
-        try:
-            obj = json.loads(data.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
-            return
-        if isinstance(obj, dict):
-            result["usage"] = obj.get("usage") if isinstance(obj.get("usage"), dict) else None
-            for choice in obj.get("choices") or []:
-                if not isinstance(choice, dict):
-                    continue
-                message = choice.get("message") or {}
-                if isinstance(message, dict):
-                    result["tool_calls"] += len(message.get("tool_calls") or [])
-                    self._collect_text(result, message.get("content"))
-                self._collect_text(result, choice.get("text"))
+        for call in tools:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function") if isinstance(call.get("function"), dict) else {}
+            name = function.get("name")
+            if streaming and not name and not call.get("id"):
+                continue
+            result["tool_calls"] += 1
+            result["tool_names"].append(name if isinstance(name, str) else "")
 
     def _relay_stream(self, resp, result, injected):
         self._relay_headers(resp, close=True)
@@ -734,12 +945,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 if out is not None:
                     self._write(out)
         except socket.timeout:
-            self.metrics.upstream_failures.add(1, reason="timeout")
+            self.metrics.upstream_failures.add(1, reason="timeout", framework=self.state.framework)
             result["outcome"] = "timeout"
         except _ClientGone:
             raise
         except OSError:
-            self.metrics.upstream_failures.add(1, reason="read")
+            self.metrics.upstream_failures.add(1, reason="read", framework=self.state.framework)
             result["outcome"] = "upstream_error"
         if result["t_end"] is None:
             result["t_end"] = time.monotonic()
@@ -757,26 +968,39 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if not isinstance(obj, dict):
             return False
         choices = obj.get("choices") or []
+        if obj.get("error") and not choices and result["outcome"] == "success":
+            # MLX-VLM reports a failure inside an already-started 200 stream.
+            result["outcome"] = "server_error"
         usage = obj.get("usage")
         if isinstance(usage, dict):
             result["usage"] = usage
+            self._collect_timings(result, obj.get("timings"))
             if injected and not choices:
                 return True
         for choice in choices:
             if not isinstance(choice, dict):
                 continue
+            self._collect_finish(result, choice)
             delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
             content = delta.get("content")
-            reasoning = delta.get("reasoning")
+            reasoning = delta.get("reasoning") or delta.get("reasoning_content")
             tools = delta.get("tool_calls") or []
             text = choice.get("text")
-            if tools:
-                result["tool_calls"] += len(tools)
+            self._collect_tools(result, tools, streaming=True)
+            if reasoning:
+                result["reasoning"] = True
             if (content or reasoning or tools or text) and result["t_first"] is None:
                 result["t_first"] = time.monotonic()
             self._collect_text(result, content)
             self._collect_text(result, text)
         return False
+
+    @staticmethod
+    def _collect_timings(result, timings):
+        """Keep the final per-request timings block (it has prompt_ms; the
+        running timings on content events only carry a partial rate)."""
+        if isinstance(timings, dict) and "prompt_ms" in timings:
+            result["timings"] = timings
 
     def _collect_text(self, result, text):
         if result["text"] is None or not isinstance(text, str) or not text:
@@ -798,19 +1022,44 @@ class ProxyHandler(BaseHTTPRequestHandler):
         model, endpoint, stream = labels["model"], labels["endpoint"], labels["stream"] == "true"
         if outcome != "success":
             return
-        m.last_success.set(time.time(), model=model)
+        # Every request-derived series carries the framework, so the
+        # dashboards' $framework filter applies to all of them.
+        mf = {"model": model, "framework": labels["framework"]}
+        m.last_success.set(time.time(), **mf)
         if result["tool_calls"]:
-            m.tool_calls.add(result["tool_calls"], model=model)
+            m.tool_calls.add(result["tool_calls"], **mf)
+            for name in result["tool_names"]:
+                m.tool_calls_by_tool.add(1, tool=state.tool_label(name), **mf)
+        m.responses.add(1, kind=_response_kind(endpoint, result), finish_reason=_finish_label(result["finish_reason"]), **labels)
+        if cfg["confidence_metrics_enabled"] and result["logprobs"]:
+            scored = score_confidence(result["logprobs"], cfg)
+            mean, low_prob, perplexity, low_ratio = scored
+            m.c_scored.add(1, source=result["logprobs_source"], **mf)
+            m.c_mean.observe(mean, **mf)
+            m.c_min.observe(low_prob, **mf)
+            m.c_ppl.observe(perplexity, **mf)
+            m.c_low_ratio.observe(low_ratio, **mf)
+            if low_ratio >= cfg["confidence_low_response_ratio"]:
+                m.c_low.add(1, **mf)
+            else:
+                m.c_low.touch(**mf)
         usage = result["usage"] or {}
         prompt = usage.get("prompt_tokens")
         completion = usage.get("completion_tokens")
-        have_usage = isinstance(prompt, int) and isinstance(completion, int)
+        have_usage = _is_count(prompt) and _is_count(completion)
         if stream and result["t_first"] is not None:
-            m.ttft.observe(result["t_first"] - t0, model=model, endpoint=endpoint)
+            m.ttft.observe(result["t_first"] - t0, endpoint=endpoint, **mf)
             generation = end - result["t_first"]
-            m.generation_duration.observe(generation, model=model, endpoint=endpoint)
+            m.generation_duration.observe(generation, endpoint=endpoint, **mf)
             if have_usage and completion >= 2 and generation > 0:
-                m.tokens_per_second.observe((completion - 1) / generation, model=model, endpoint=endpoint)
+                m.tokens_per_second.observe((completion - 1) / generation, endpoint=endpoint, **mf)
+        timings = result["timings"] or {}
+        server_tps, prompt_ms = timings.get("predicted_per_second"), timings.get("prompt_ms")
+        # MLX-VLM reports 0 when it has no measurement; that is not a rate.
+        if _is_number(server_tps) and server_tps > 0:
+            m.server_tps.observe(float(server_tps), stream=labels["stream"], **mf)
+        if _is_number(prompt_ms) and prompt_ms > 0:
+            m.server_prompt_duration.observe(prompt_ms / 1000.0, stream=labels["stream"], **mf)
         if not have_usage:
             m.usage_missing.add(1, **labels)
         else:
@@ -818,26 +1067,90 @@ class ProxyHandler(BaseHTTPRequestHandler):
             m.completion_tokens.add(completion, **labels)
             details = usage.get("prompt_tokens_details")
             cached = details.get("cached_tokens") if isinstance(details, dict) else None
-            if isinstance(cached, int):
+            if _is_count(cached):
                 m.cached_tokens.add(cached, **labels)
-            m.request_prompt_tokens.observe(prompt, model=model)
-            m.request_completion_tokens.observe(completion, model=model)
-            m.request_context_tokens.observe(prompt + completion, model=model)
+            m.request_prompt_tokens.observe(prompt, **mf)
+            m.request_completion_tokens.observe(completion, **mf)
+            m.request_context_tokens.observe(prompt + completion, **mf)
             max_ctx = state_max_context(state)
             if max_ctx:
-                m.context_utilization.observe(min(1.5, (prompt + completion) / float(max_ctx)), model=model)
+                m.context_utilization.observe(min(1.5, (prompt + completion) / float(max_ctx)), **mf)
         if result["text"]:
             scored = score_quality("".join(result["text"]), cfg)
             if scored is not None:
                 repetition, _hedging, _refusal, flags, risk = scored
-                m.q_evaluations.add(1, model=model)
-                m.q_repetition.observe(repetition, model=model)
-                m.q_risk.observe(risk, model=model)
-                m.q_last_risk.set(risk, model=model)
+                m.q_evaluations.add(1, **mf)
+                m.q_repetition.observe(repetition, **mf)
+                m.q_risk.observe(risk, **mf)
+                m.q_last_risk.set(risk, **mf)
                 for flag in flags:
-                    m.q_flags.add(1, model=model, flag=flag)
+                    m.q_flags.add(1, flag=flag, **mf)
                 if flags:
-                    m.q_flagged.add(1, model=model)
+                    m.q_flagged.add(1, **mf)
+
+
+_FINISH_REASONS = ("stop", "length", "tool_calls", "content_filter", "function_call")
+
+
+def _finish_label(reason):
+    """Bounded finish_reason label: the OpenAI values, else other / none."""
+    if reason is None:
+        return "none"
+    return reason if reason in _FINISH_REASONS else "other"
+
+
+def _response_kind(endpoint, result):
+    """What the response was: a legacy completion, a tool call, a reasoning
+    (thinking) answer or a plain chat answer, in that precedence."""
+    if endpoint == "completion":
+        return "completion"
+    if result["tool_calls"]:
+        return "tool_call"
+    if result["reasoning"]:
+        return "reasoning"
+    return "chat"
+
+
+def _sampled_logprobs(logprobs, framework):
+    """Logprobs of the sampled tokens from an OpenAI-style logprobs block
+    (chat: content[].logprob; legacy completions: token_logprobs[]), or None.
+    MLX-LM in top_logprobs mode reports the first entry of an unsorted top-k
+    partition instead of the sampled token, so such replies are not scored."""
+    if not isinstance(logprobs, dict):
+        return None
+    values = []
+    content = logprobs.get("content")
+    if isinstance(content, list):
+        for entry in content:
+            if not isinstance(entry, dict):
+                continue
+            if framework == "mlx-lm" and entry.get("top_logprobs"):
+                return None
+            if _is_number(entry.get("logprob")):
+                values.append(float(entry["logprob"]))
+    elif isinstance(logprobs.get("token_logprobs"), list):
+        values = [float(v) for v in logprobs["token_logprobs"] if _is_number(v)]
+    return values or None
+
+
+def score_confidence(logprobs, cfg):
+    """(mean token probability, lowest token probability, perplexity, share
+    of tokens below confidence_low_token_probability) of the sampled tokens.
+    A measure of how sure the model was, not of whether it was right."""
+    probs = [math.exp(min(0.0, lp)) for lp in logprobs]
+    mean_lp = sum(min(0.0, lp) for lp in logprobs) / len(logprobs)
+    threshold = cfg["confidence_low_token_probability"]
+    low = sum(1 for p in probs if p < threshold) / float(len(probs))
+    return sum(probs) / len(probs), min(probs), math.exp(-mean_lp), low
+
+
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value == value
+
+
+def _is_count(value):
+    """A token count as servers report it: a non-negative int, never a bool."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def state_max_context(state):
@@ -848,7 +1161,7 @@ def run_proxy(cfg, metrics, state):
     ProxyHandler.cfg, ProxyHandler.metrics, ProxyHandler.state = cfg, metrics, state
     server = ThreadingHTTPServer((cfg["proxy_host"], cfg["proxy_port"]), ProxyHandler)
     server.daemon_threads = True
-    LOG.info("proxy listening on %s:%s -> MLX-LM %s:%s", cfg["proxy_host"], cfg["proxy_port"],
+    LOG.info("proxy listening on %s:%s -> inference server %s:%s", cfg["proxy_host"], cfg["proxy_port"],
              cfg["upstream_host"], cfg["upstream_port"])
     return server
 
@@ -866,10 +1179,83 @@ def _run(argv, timeout=5):
         return -1, ""
 
 
-def _http_get(url, timeout):
-    req = urllib.request.Request(url, method="GET")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - loopback URL from config
-        return resp.status, resp.read(1048576)
+def _http_get(url, timeout, token=None, with_headers=False):
+    """GET a URL; an HTTP error status is returned, not raised. The token is
+    sent as a Bearer header and never logged."""
+    headers = {"Authorization": "Bearer " + token} if token else {}
+    req = urllib.request.Request(url, method="GET", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - URL from config
+            status, data, resp_headers = resp.status, resp.read(4194304), resp.headers
+    except urllib.error.HTTPError as exc:
+        status, data, resp_headers = exc.code, b"", exc.headers
+    return (status, data, resp_headers) if with_headers else (status, data)
+
+
+def _read_secret(path):
+    """First line of a 0600 key file, or None. Read on every use so a rotated
+    key needs no restart; the value never leaves this process except as the
+    Authorization header to the configured server."""
+    if not path:
+        return None
+    try:
+        with open(os.path.expanduser(path), encoding="utf-8") as handle:
+            return handle.readline().strip() or None
+    except OSError:
+        return None
+
+
+def framework_from_response(headers, body):
+    """Identify the server answering on the upstream port from its /health
+    response: MLX-VLM (FastAPI) stamps every response with a Server:
+    mlx_vlm/<version> header; MLX-LM (http.server) answers /health with exactly
+    {"status": "ok"|"unavailable"} and a BaseHTTP Server header. Anything else
+    (including OMLX, which wraps both) is not claimed."""
+    server = (headers.get("Server", "") if headers is not None else "") or ""
+    if server.lower().startswith("mlx_vlm/"):
+        return "mlx-vlm"
+    try:
+        obj = json.loads(body.decode("utf-8")) if body else None
+    except (UnicodeDecodeError, ValueError):
+        obj = None
+    if isinstance(obj, dict) and "loaded_model" in obj and "continuous_batching_enabled" in obj:
+        return "mlx-vlm"
+    if (server.startswith("BaseHTTP/") and isinstance(obj, dict) and set(obj) == {"status"}
+            and obj["status"] in ("ok", "unavailable")):
+        return "mlx-lm"
+    return None
+
+
+# Executables a real server process runs as: a Python interpreter (python3,
+# python3.12, macOS's Python.app "Python") or the console-script entry points.
+_SERVER_EXECUTABLES = re.compile(r"^(python[0-9.]*|Python|mlx_lm\.server|mlx_vlm\.server|mlx_lm|mlx_vlm)$")
+
+
+def _is_server_command(command, pattern, strict):
+    if not pattern.search(command):
+        return False
+    if not strict:
+        return True
+    tokens = command.split()
+    if not tokens or not _SERVER_EXECUTABLES.match(os.path.basename(tokens[0])):
+        return False
+    # The server must be what runs (entry point, script or -m module, within
+    # the first tokens), not an argument passed to some other program.
+    return bool(pattern.search(" ".join(tokens[:4])))
+
+
+def _etime_seconds(value):
+    """ps etime ([[dd-]hh:]mm:ss) to seconds, or None."""
+    match = re.match(r"^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$", value or "")
+    if not match:
+        return None
+    days, hours, minutes, seconds = (int(g or 0) for g in match.groups())
+    return ((days * 24 + hours) * 60 + minutes) * 60 + seconds
+
+
+def _port_from_argv(command):
+    match = re.search(r"--port(?:=|\s+)(\d+)", command)
+    return int(match.group(1)) if match else None
 
 
 _SIZE = {"B": 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}
@@ -911,10 +1297,64 @@ def _find_config_json(model, cfg):
     for path in candidates:
         try:
             with open(path, encoding="utf-8") as handle:
-                return json.load(handle)
+                config = json.load(handle)
         except (OSError, ValueError):
             continue
+        if isinstance(config, dict):
+            config["__dir__"] = os.path.dirname(path)
+            return config
     return None
+
+
+_ARCH_KEYS = (("layers", ("num_hidden_layers", "n_layer", "num_layers")),
+              ("attention_heads", ("num_attention_heads", "n_head")),
+              ("kv_heads", ("num_key_value_heads",)),
+              ("head_dim", ("head_dim",)),
+              ("hidden_size", ("hidden_size", "n_embd", "d_model")),
+              ("intermediate_size", ("intermediate_size",)),
+              ("vocab_size", ("vocab_size",)))
+
+
+def _architecture_from(config):
+    """(numeric attrs, labels, kv bytes per token or None, weights bytes or
+    None) from a model's config.json. VLM configs keep the language model
+    under text_config. The KV estimate assumes full attention and an fp16 KV
+    cache: sliding-window, linear-attention or quantised KV caches use less."""
+    if not isinstance(config, dict):
+        return {}, {}, None, None
+    text = config.get("text_config") if isinstance(config.get("text_config"), dict) else {}
+    attrs = {}
+    for attr, keys in _ARCH_KEYS:
+        for scope in (text, config):
+            value = next((scope[k] for k in keys if _is_count(scope.get(k)) and scope.get(k) > 0), None)
+            if value is not None:
+                attrs[attr] = value
+                break
+    if "kv_heads" not in attrs and "attention_heads" in attrs:
+        attrs["kv_heads"] = attrs["attention_heads"]
+    if "head_dim" not in attrs and attrs.get("hidden_size") and attrs.get("attention_heads"):
+        attrs["head_dim"] = attrs["hidden_size"] // attrs["attention_heads"]
+    quant = config.get("quantization") if isinstance(config.get("quantization"), dict) else {}
+    for attr, key in (("quant_bits", "bits"), ("quant_group_size", "group_size")):
+        if _is_count(quant.get(key)):
+            attrs[attr] = quant[key]
+    archs = config.get("architectures")
+    labels = {"architecture": str(archs[0])[:64] if isinstance(archs, list) and archs else "unknown",
+              "model_type": str(config.get("model_type") or text.get("model_type") or "unknown")[:64],
+              "quantization": ("%s-bit" % attrs["quant_bits"]) if "quant_bits" in attrs else "none"}
+    kv = None
+    if all(k in attrs for k in ("layers", "kv_heads", "head_dim")):
+        kv = 2 * attrs["layers"] * attrs["kv_heads"] * attrs["head_dim"] * 2
+    weights = None
+    directory = config.get("__dir__")
+    if directory:
+        try:
+            sizes = [os.path.getsize(os.path.join(directory, name)) for name in os.listdir(directory)
+                     if name.endswith(".safetensors")]
+            weights = sum(sizes) if sizes else None
+        except OSError:
+            weights = None
+    return attrs, labels, kv, weights
 
 
 def _max_context_from(config):
@@ -934,9 +1374,27 @@ class Health:
     def __init__(self, cfg, metrics, state):
         self.cfg, self.m, self.state = cfg, metrics, state
         self.uid = os.getuid()
-        self.pattern = re.compile(cfg["mlx_process_pattern"])
+        # (framework, pattern, strict): a customised pattern is trusted as is.
+        self.patterns = [
+            ("mlx-lm", re.compile(cfg["mlx_process_pattern"]), cfg["mlx_process_pattern"] == DEFAULT_LM_PATTERN),
+            ("mlx-vlm", re.compile(cfg["mlx_vlm_process_pattern"]), cfg["mlx_vlm_process_pattern"] == DEFAULT_VLM_PATTERN),
+        ]
+        self.http_framework = None
+        self.process_framework = None
+        self.omlx = OMLXCollector(cfg, metrics) if cfg["omlx_enabled"] else None
+        self.next_omlx = 0.0
+        self.vlm_cache = VLMCacheCollector(cfg, metrics, self._token) if cfg["vlm_cache_stats_enabled"] else None
+        self.next_vlm_cache = 0.0
+        self.process_counts = {}
+        # Set after the first tick: until then the framework is not known, and
+        # exporting would leave short-lived framework="unknown" series.
+        self.ready = threading.Event()
         self.last_pid = None
         self.raw_model = ""
+        self.raw_command = ""
+        self.config_key = None
+        self.model_config = None
+        self.lm_log = MLXLMLogCollector(cfg, metrics) if cfg["server_log_path"] else None
         self.next_models = 0.0
         self.next_probe = 0.0
         self.next_hardware = 0.0
@@ -944,16 +1402,42 @@ class Health:
         self.thermal = _ThermalState()
         state.max_context = 0
         m = metrics
-        for check in ("http", "models", "inference"):
-            m.check_failures.touch(check=check)
-        m.process_restarts.touch()
-        m.upstream_failures.touch(reason="connect")
         m.export_failures.touch()
-        m.telemetry_info.set(1, version=VERSION,
-                             proxy="enabled" if cfg["proxy_enabled"] else "disabled",
-                             hardware="enabled" if cfg["hardware_metrics_enabled"] else "disabled",
-                             quality="enabled" if cfg["quality_metrics_enabled"] else "disabled")
+        self.info = {"version": VERSION,
+                     "proxy": "enabled" if cfg["proxy_enabled"] else "disabled",
+                     "hardware": "enabled" if cfg["hardware_metrics_enabled"] else "disabled",
+                     "quality": "enabled" if cfg["quality_metrics_enabled"] else "disabled",
+                     "omlx": "enabled" if cfg["omlx_enabled"] else "disabled",
+                     "confidence": "enabled" if cfg["confidence_metrics_enabled"] else "disabled"}
+        self._publish_framework()
         m.activity_expected.set(1 if cfg["activity_expected"] else 0)
+
+    # Node-level series that carry the node's framework. On a change they are
+    # relabelled in place, so no series is ever exported without the label and
+    # the old framework's series stop at once.
+    def _framework_gauges(self):
+        m = self.m
+        return (m.server_up, m.models_api_up, m.probe_up, m.probe_duration, m.check_last_success,
+                m.check_duration, m.process_up, m.process_rss, m.process_footprint, m.process_cpu,
+                m.process_uptime, m.launchd_runs, m.active)
+
+    @property
+    def fw(self):
+        return {"framework": self.state.framework}
+
+    def _publish_framework(self):
+        m, fw = self.m, self.fw
+        m.telemetry_info.replace([(1, dict(self.info, **fw))])
+        # Zeros, so "no failures yet" is distinguishable from "no telemetry".
+        # Not for "unknown" (the state before the first detection), which would
+        # otherwise leave flat zero series for a framework the node never had.
+        if fw["framework"] != "unknown":
+            for check in ("http", "models", "inference"):
+                m.check_failures.touch(check=check, **fw)
+            m.process_restarts.touch(**fw)
+            m.upstream_failures.touch(reason="connect", **fw)
+        for gauge in self._framework_gauges():
+            gauge.relabel("framework", fw["framework"])
 
     def run_forever(self, stop):
         while not stop.is_set():
@@ -968,6 +1452,8 @@ class Health:
         now = time.monotonic()
         self.check_process()
         self.check_http()
+        # Before the probe and the KV poll, which depend on the framework.
+        self.update_framework()
         if now >= self.next_models:
             self.next_models = now + self.cfg["models_check_interval_seconds"]
             self.check_models()
@@ -977,8 +1463,40 @@ class Health:
         if self.cfg["hardware_metrics_enabled"] and now >= self.next_hardware:
             self.next_hardware = now + self.cfg["hardware_interval_seconds"]
             self.hardware()
+        if self.omlx is not None and now >= self.next_omlx:
+            self.next_omlx = now + self.cfg["omlx_poll_interval_seconds"]
+            self.omlx.poll()
+        if self.vlm_cache is not None and now >= self.next_vlm_cache:
+            self.next_vlm_cache = now + self.cfg["models_check_interval_seconds"]
+            self.vlm_cache.poll(self.state.framework == "mlx-vlm", self.base, self.state.served_model or "unknown")
         self.update_model()
+        if self.lm_log is not None:
+            self.lm_log.poll(self.state.framework == "mlx-lm", self.state.served_model or "unknown", self.raw_command)
         self.m.telemetry_up.set(1)
+        self.ready.set()
+
+    def update_framework(self):
+        """Inventory override, else what answers on the upstream port, else
+        which server process was found. 'unknown' is reported, never guessed."""
+        if self.cfg["framework"] in FRAMEWORKS:
+            framework, source = self.cfg["framework"], "config"
+        elif self.http_framework:
+            framework, source = self.http_framework, "http"
+        elif self.process_framework:
+            framework, source = self.process_framework, "process"
+        else:
+            framework, source = "unknown", "none"
+        with self.state.lock:
+            changed = framework != self.state.framework
+            self.state.framework, self.state.framework_source = framework, source
+        if changed:
+            self._publish_framework()
+        self.m.framework_info.replace([(1, {"framework": framework, "source": source})])
+        self.m.framework_processes.replace(
+            [(self.process_counts.get(name, 0), {"framework": name}) for name in FRAMEWORKS])
+
+    def _token(self):
+        return _read_secret(self.cfg["upstream_api_key_file"])
 
     # -- process -------------------------------------------------------------
 
@@ -999,47 +1517,85 @@ class Health:
         return {}
 
     def check_process(self):
-        m = self.m
+        m, fw = self.m, self.fw
         pid, command = None, ""
         info = self._launchd()
         if info is not None:
             if "runs" in info:
-                m.launchd_runs.set(info["runs"])
+                m.launchd_runs.set(info["runs"], **fw)
             if info.get("running") and info.get("pid"):
                 pid = info["pid"]
         rc, out = _run(["ps", "-axww", "-o", "pid=,command="])
+        pid, command, self.process_framework = self.select_process(out, pid)
+        if pid is None:
+            m.process_up.set(0, **fw)
+            for gauge in (m.process_rss, m.process_cpu, m.process_footprint, m.process_uptime):
+                gauge.set(None, **fw)
+            return
+        m.process_up.set(1, **fw)
+        if self.last_pid is not None and pid != self.last_pid:
+            m.process_restarts.add(1, **fw)
+        self.last_pid = pid
+        if command:
+            self.raw_model = _model_from_argv(command) or self.raw_model
+            self.raw_command = command
+        rc, out = _run(["ps", "-o", "rss=,%cpu=,etime=", "-p", str(pid)])
+        fields = out.split()
+        if rc == 0 and len(fields) >= 3:
+            try:
+                m.process_rss.set(int(fields[0]) * 1024, **fw)
+                m.process_cpu.set(float(fields[1]), **fw)
+            except ValueError:
+                pass
+            m.process_uptime.set(_etime_seconds(fields[2]), **fw)
+        m.process_footprint.set(_footprint(pid), **fw)
+
+    def classify(self, command, strict=True):
+        for framework, pattern, is_default in self.patterns:
+            if _is_server_command(command, pattern, strict and is_default):
+                return framework
+        return None
+
+    def select_process(self, ps_output, launchd_pid=None):
+        """Return (pid, command, framework) of the inference server, or
+        (None, "", None). With a launchd pid, that process is the server and
+        is only classified. Otherwise only MLX-LM / MLX-VLM server processes
+        serving the upstream port count (--port, or no --port when the upstream
+        is the servers' default 8080), preferring the framework that answers on
+        the port. A server started without --port on another port needs
+        mlx_launchagent_label or llm_framework."""
         me = os.getpid()
-        for line in out.splitlines():
+        candidates, launchd_match = [], None
+        for line in ps_output.splitlines():
             parts = line.strip().split(None, 1)
             if len(parts) != 2 or not parts[0].isdigit():
                 continue
             this_pid, this_cmd = int(parts[0]), parts[1]
             if this_pid == me or "mlx_telemetry" in this_cmd or "mlx-telemetry" in this_cmd:
                 continue
-            if (pid is not None and this_pid == pid) or (pid is None and self.pattern.search(this_cmd)):
-                pid, command = this_pid, this_cmd
-                break
-        if pid is None:
-            m.process_up.set(0)
-            m.process_rss.set(None)
-            m.process_cpu.set(None)
-            m.process_footprint.set(None)
-            return
-        m.process_up.set(1)
-        if self.last_pid is not None and pid != self.last_pid:
-            m.process_restarts.add(1)
-        self.last_pid = pid
-        if command:
-            self.raw_model = _model_from_argv(command) or self.raw_model
-        rc, out = _run(["ps", "-o", "rss=,%cpu=", "-p", str(pid)])
-        fields = out.split()
-        if rc == 0 and len(fields) >= 2:
-            try:
-                m.process_rss.set(int(fields[0]) * 1024)
-                m.process_cpu.set(float(fields[1]))
-            except ValueError:
-                pass
-        m.process_footprint.set(_footprint(pid))
+            if launchd_pid is not None and this_pid == launchd_pid:
+                launchd_match = (this_pid, this_cmd, self.classify(this_cmd, strict=False))
+            framework = self.classify(this_cmd)
+            if framework:
+                candidates.append((this_pid, this_cmd, framework))
+        # Reported per framework, so a Mac genuinely running both shows both.
+        self.process_counts = {}
+        for _pid, _cmd, framework in candidates:
+            self.process_counts[framework] = self.process_counts.get(framework, 0) + 1
+        if launchd_pid is not None:
+            return launchd_match or (launchd_pid, "", None)
+        port = self.cfg["upstream_port"]
+
+        def serves_port(candidate):
+            argv_port = _port_from_argv(candidate[1])
+            return argv_port == port or (argv_port is None and port == 8080)
+        # A server on another port is not this node's server (it is still
+        # counted above): without this, a stopped server would be "replaced"
+        # by any other MLX server on the Mac.
+        mine = [c for c in candidates if serves_port(c)]
+        if not mine:
+            return None, "", None
+        return min(mine, key=lambda c: 0 if c[2] == self.http_framework else 1)
 
     # -- endpoints -----------------------------------------------------------
 
@@ -1051,22 +1607,27 @@ class Health:
             ok = bool(fn())
         except Exception:
             ok = False
-        m.check_duration.set(time.monotonic() - started, check=name)
+        m.check_duration.set(time.monotonic() - started, check=name, **self.fw)
         if ok:
-            m.check_last_success.set(time.time(), check=name)
+            m.check_last_success.set(time.time(), check=name, **self.fw)
         else:
-            m.check_failures.add(1, check=name)
+            m.check_failures.add(1, check=name, **self.fw)
         return ok
 
     def check_http(self):
         def health():
-            status, _ = _http_get(self.base + "/health", 5)
+            # Cleared first: nothing answering means nothing is identified.
+            self.http_framework = None
+            status, data, headers = _http_get(self.base + "/health", 5, self._token(), with_headers=True)
+            # Identifies the server even when it answers 401 (MLX-VLM with an
+            # API key) or 503 (MLX-LM still loading).
+            self.http_framework = framework_from_response(headers, data)
             return status == 200
-        self.m.server_up.set(1 if self._check("http", health) else 0)
+        self.m.server_up.set(1 if self._check("http", health) else 0, **self.fw)
 
     def check_models(self):
         def models():
-            status, data = _http_get(self.base + "/v1/models", 10)
+            status, data = _http_get(self.base + "/v1/models", 10, self._token())
             if status != 200:
                 return False
             obj = json.loads(data.decode("utf-8"))
@@ -1074,21 +1635,37 @@ class Health:
             with self.state.lock:
                 self.state.known_models = set(i for i in ids if i)
             return True
-        self.m.models_api_up.set(1 if self._check("models", models) else 0)
+        self.m.models_api_up.set(1 if self._check("models", models) else 0, **self.fw)
 
     def probe(self):
         cfg = self.cfg
         started = time.monotonic()
 
         def inference():
-            body = json.dumps({"prompt": cfg["inference_probe_prompt"], "max_tokens": 1, "stream": False}).encode()
-            req = urllib.request.Request(self.base + "/v1/completions", data=body, method="POST",
-                                         headers={"Content-Type": "application/json"})
+            headers = {"Content-Type": "application/json"}
+            token = self._token()
+            if token:
+                headers["Authorization"] = "Bearer " + token
+            if self.state.framework == "mlx-vlm":
+                # MLX-VLM has no /v1/completions and rejects a request without
+                # "model" (422), so name the model it serves: its --model
+                # argument, else the only model /v1/models lists.
+                path, payload = "/v1/chat/completions", {"messages": [{"role": "user", "content": cfg["inference_probe_prompt"]}]}
+                with self.state.lock:
+                    known = sorted(self.state.known_models)
+                model = self.raw_model or (known[0] if len(known) == 1 else "")
+                if model:
+                    payload["model"] = model
+            else:
+                path, payload = "/v1/completions", {"prompt": cfg["inference_probe_prompt"]}
+            payload.update(max_tokens=1, stream=False)
+            req = urllib.request.Request(self.base + path, data=json.dumps(payload).encode(), method="POST",
+                                         headers=headers)
             with urllib.request.urlopen(req, timeout=cfg["proxy_read_timeout_seconds"]) as resp:  # noqa: S310
                 return resp.status == 200
         ok = self._check("inference", inference)
-        self.m.probe_up.set(1 if ok else 0)
-        self.m.probe_duration.set(time.monotonic() - started)
+        self.m.probe_up.set(1 if ok else 0, **self.fw)
+        self.m.probe_duration.set(time.monotonic() - started, **self.fw)
 
     def update_model(self):
         cfg, m, state = self.cfg, self.m, self.state
@@ -1103,11 +1680,20 @@ class Health:
         with state.lock:
             state.served_model, state.served_model_source = model, source
         m.model_info.replace([(1, {"model": model, "source": source})] if model else [])
-        max_ctx = cfg["model_max_context_tokens"]
-        if not max_ctx and (self.raw_model or cfg["model_path"]):
-            max_ctx = _max_context_from(_find_config_json(self.raw_model, cfg))
+        key = (self.raw_model, cfg["model_path"])
+        if key != self.config_key:
+            # Read once per model, not on every tick.
+            self.config_key = key
+            self.model_config = _find_config_json(self.raw_model, cfg) if any(key) else None
+        max_ctx = cfg["model_max_context_tokens"] or _max_context_from(self.model_config)
         state.max_context = max_ctx
-        m.model_max_context.replace([(max_ctx, {"model": model or "unknown"})] if max_ctx else [])
+        label = model or "unknown"
+        m.model_max_context.replace([(max_ctx, {"model": label})] if max_ctx else [])
+        attrs, arch, kv, weights = _architecture_from(self.model_config)
+        m.model_config.replace([(v, {"model": label, "attr": a}) for a, v in sorted(attrs.items())])
+        m.model_arch.replace([(1, dict(arch, model=label))] if arch else [])
+        m.model_kv_per_token.replace([(kv, {"model": label})] if kv else [])
+        m.model_weights.replace([(weights, {"model": label})] if weights else [])
 
     # -- hardware ------------------------------------------------------------
 
@@ -1175,12 +1761,320 @@ class _ThermalState:
 
 
 # --------------------------------------------------------------------------
+# KV cache: MLX-VLM's prefix cache and (optional) OMLX
+# --------------------------------------------------------------------------
+
+# Figures a source may report. "allocated" has no counterpart separate from
+# "used" in either source (each reports what its tiers hold and their
+# budget), so it is always reported unavailable. Dashboards read
+# mlx_kv_cache_metric_available to say "Unavailable" instead of showing 0.
+_KV_FIGURES = ("hot_used", "hot_capacity", "ssd_used", "ssd_capacity", "lookups", "evictions")
+
+
+def _num(source, key):
+    value = source.get(key) if isinstance(source, dict) else None
+    return value if _is_number(value) and value >= 0 else None
+
+
+class KVCollector:
+    """Shared publishing for one KV-cache source (label source=<name>)."""
+    source = ""
+
+    def __init__(self, cfg, metrics):
+        self.cfg, self.m = cfg, metrics
+        self.models = set()
+
+    def start_reporting(self):
+        """Series appear only once the source applies to this node."""
+        self.m.kv_failures.touch(source=self.source, reason="connect")
+        self.m.kv_up.replace([(0, {"source": self.source})], source=self.source)
+
+    def _model(self, value):
+        model = sanitize_model(value) or "unknown"
+        if model not in self.models:
+            if len(self.models) >= self.cfg["model_label_max_values"]:
+                return "other"
+            self.models.add(model)
+        return model
+
+    def _get(self, url, timeout, token):
+        """Returns the decoded JSON object, or the failure reason."""
+        try:
+            status, data = _http_get(url, timeout, token)
+        except (OSError, ValueError):
+            return "connect"
+        if status in (401, 403):
+            return "auth"
+        if status != 200:
+            return "http"
+        try:
+            obj = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return "parse"
+        return obj if isinstance(obj, dict) else "parse"
+
+    def fail(self, reason):
+        self.m.kv_failures.add(1, source=self.source, reason=reason)
+        self.clear(up=0)
+
+    def clear(self, up):
+        """Stale KV figures would read as current, so drop them all."""
+        m, src = self.m, self.source
+        for gauge in (m.kv_used, m.kv_capacity, m.kv_utilization, m.kv_entries, m.kv_entries_capacity, m.kv_enabled):
+            gauge.replace([], source=src)
+        for counter in (m.kv_lookups, m.kv_hot_hits, m.kv_evictions):
+            counter.retain(src, ())
+        m.kv_available.replace([(0, {"source": src, "metric": name}) for name in _KV_FIGURES + ("allocated",)], source=src)
+        m.kv_up.replace([(up, {"source": src})], source=src)
+
+    def publish(self, used, capacities, entries, entries_capacity, seen):
+        """used/entries: [(value, {"tier", "model"})]; capacities and
+        entries_capacity: {tier: value or None}. Utilisation per tier = the
+        sum over models / that tier's capacity, only when a capacity (> 0) is
+        reported."""
+        m, src = self.m, self.source
+        tag = lambda series: [(v, dict(labels, source=src)) for v, labels in series]  # noqa: E731
+        m.kv_used.replace(tag(used), source=src)
+        m.kv_entries.replace(tag(entries), source=src)
+        m.kv_entries_capacity.replace([(v, {"source": src, "tier": t}) for t, v in entries_capacity.items() if v], source=src)
+        capacity, utilization = [], []
+        for tier, cap in capacities.items():
+            seen[tier + "_capacity"] = bool(cap)
+            if not cap:
+                continue
+            capacity.append((cap, {"source": src, "tier": tier}))
+            tier_used = [value for value, labels in used if labels["tier"] == tier]
+            if tier_used:
+                utilization.append((min(100.0, 100.0 * sum(tier_used) / cap), {"source": src, "tier": tier}))
+        m.kv_capacity.replace(capacity, source=src)
+        m.kv_utilization.replace(utilization, source=src)
+        m.kv_available.replace([(1 if seen.get(name) else 0, {"source": src, "metric": name}) for name in _KV_FIGURES]
+                               + [(0, {"source": src, "metric": "allocated"})], source=src)
+        m.kv_enabled.replace([(1, {"source": src})], source=src)
+        m.kv_up.replace([(1, {"source": src})], source=src)
+
+
+class OMLXCollector(KVCollector):
+    """Polls OMLX's documented admin endpoint GET /admin/api/stats (Bearer =
+    OMLX's main API key; no key needed when OMLX runs loopback-only with
+    authentication disabled) and copies its KV-cache figures.
+
+    Only the runtime_cache block and uptime are read. The response also
+    carries OMLX's own API key and paths; those fields are never read,
+    exported or logged. Nothing is sent to OMLX except this GET."""
+    source = "omlx"
+
+    def __init__(self, cfg, metrics):
+        KVCollector.__init__(self, cfg, metrics)
+        self.url = cfg["omlx_url"].rstrip("/") + "/admin/api/stats"
+        self.start_reporting()
+
+    def poll(self):
+        obj = self._get(self.url, self.cfg["omlx_timeout_seconds"], _read_secret(self.cfg["omlx_api_key_file"]))
+        if isinstance(obj, str):
+            return self.fail(obj)
+        cache = obj.get("runtime_cache")
+        if not isinstance(cache, dict):
+            return self.fail("parse")
+        self.apply(cache, obj.get("uptime_seconds"))
+
+    def apply(self, cache, uptime=None):
+        m, src = self.m, self.source
+        start_ns = int((time.time() - uptime) * 1e9) if _is_number(uptime) and uptime >= 0 else m.registry.start_ns
+        used, entries, present = [], [], set()
+        seen = {"hot_used": False, "ssd_used": False, "lookups": False, "evictions": False}
+        for row in [r for r in cache.get("models") or [] if isinstance(r, dict)]:
+            model = self._model(row.get("id"))
+            present.add(model)
+            for tier, size_key, count_key in (("hot", "hot_cache_size_bytes", "hot_cache_entries"),
+                                              ("ssd", "total_size_bytes", "num_files")):
+                size, count = _num(row, size_key), _num(row, count_key)
+                if size is not None:
+                    used.append((size, {"tier": tier, "model": model}))
+                    seen[tier + "_used"] = True
+                if count is not None:
+                    entries.append((count, {"tier": tier, "model": model}))
+            hits, misses = _num(row, "hits"), _num(row, "misses")
+            if hits is not None and misses is not None:
+                m.kv_lookups.observe_total(hits, start_ns, source=src, model=model, result="hit")
+                m.kv_lookups.observe_total(misses, start_ns, source=src, model=model, result="miss")
+                seen["lookups"] = True
+            if _num(row, "hot_cache_hits") is not None:
+                m.kv_hot_hits.observe_total(_num(row, "hot_cache_hits"), start_ns, source=src, model=model)
+            for tier, key in (("ssd", "evictions"), ("hot", "hot_cache_evictions")):
+                if _num(row, key) is not None:
+                    m.kv_evictions.observe_total(_num(row, key), start_ns, source=src, model=model, tier=tier)
+                    seen["evictions"] = True
+        for counter in (m.kv_lookups, m.kv_hot_hits, m.kv_evictions):
+            counter.retain(src, present)
+        # Process-wide budgets: OMLX keeps the largest per-model cap. 0 means
+        # no budget (hot tier off, SSD cache disabled).
+        self.publish(used, {"hot": _num(cache, "hot_cache_max_bytes"), "ssd": _num(cache, "disk_max_bytes")},
+                     entries, {}, seen)
+
+
+class VLMCacheCollector(KVCollector):
+    """MLX-VLM's Automatic Prefix Cache, GET <server>/v1/cache/stats (the same
+    server and API key as the health checks). Polled only while the node's
+    framework is mlx-vlm. With APC off (MLX-VLM's default; APC_ENABLED=1
+    turns it on) the server answers {"enabled": false}: reported as
+    mlx_kv_cache_enabled 0 with every figure unavailable, never as zeros.
+
+    Mapping (mlx-vlm 0.7.11 stats_snapshot): hot used = resident_bytes,
+    capacity = memory_max_bytes (its resident budget); entries = pool_used of
+    num_blocks; lookups = lookups_hit / lookups_miss; hot evictions = block
+    pool evictions; ssd used / capacity / evictions = disk_bytes /
+    disk_max_bytes (0 = uncapped) / disk_evictions. MLX-VLM serves one model,
+    so the model label is the node's served model."""
+    source = "mlx-vlm"
+
+    def __init__(self, cfg, metrics, token):
+        KVCollector.__init__(self, cfg, metrics)
+        self.token = token
+        self.start_ns = metrics.registry.start_ns
+        self.active = False
+
+    def poll(self, is_vlm, base, model="unknown"):
+        if not is_vlm:
+            if self.active:
+                # The node stopped running MLX-VLM: drop its figures entirely.
+                self.clear(up=0)
+                self.m.kv_up.replace([], source=self.source)
+                self.active = False
+            return
+        if not self.active:
+            self.start_reporting()
+            self.active = True
+        obj = self._get(base + "/v1/cache/stats", 10, self.token())
+        if isinstance(obj, str):
+            return self.fail(obj)
+        if obj.get("enabled") is not True:
+            self.clear(up=1)
+            self.m.kv_enabled.replace([(0, {"source": self.source})], source=self.source)
+            return
+        self.apply(obj, model)
+
+    def apply(self, snap, model):
+        m, src = self.m, self.source
+        model = self._model(model)
+        seen = {}
+        used, entries = [], []
+        for tier, key in (("hot", "resident_bytes"), ("ssd", "disk_bytes")):
+            if _num(snap, key) is not None:
+                used.append((_num(snap, key), {"tier": tier, "model": model}))
+                seen[tier + "_used"] = True
+        if _num(snap, "pool_used") is not None:
+            entries.append((_num(snap, "pool_used"), {"tier": "hot", "model": model}))
+        hits, misses = _num(snap, "lookups_hit"), _num(snap, "lookups_miss")
+        if hits is not None and misses is not None:
+            m.kv_lookups.observe_total(hits, self.start_ns, source=src, model=model, result="hit")
+            m.kv_lookups.observe_total(misses, self.start_ns, source=src, model=model, result="miss")
+            seen["lookups"] = True
+        for tier, key in (("hot", "evictions"), ("ssd", "disk_evictions")):
+            if _num(snap, key) is not None:
+                m.kv_evictions.observe_total(_num(snap, key), self.start_ns, source=src, model=model, tier=tier)
+                seen["evictions"] = True
+        for counter in (m.kv_lookups, m.kv_evictions):
+            counter.retain(src, {model})
+        self.publish(used, {"hot": _num(snap, "memory_max_bytes"), "ssd": _num(snap, "disk_max_bytes")},
+                     entries, {"hot": _num(snap, "num_blocks")}, seen)
+
+
+_LM_CACHE_LINE = re.compile(r"Prompt Cache: (\d+) sequences?, ([\d.]+) GB")
+
+
+def _size_from_argv(command, flag):
+    """--prompt-cache-bytes / --prompt-cache-size from the server command
+    line. Sizes accept MLX-LM's suffixes (K, M, G, T, optionally with B)."""
+    match = re.search(r"%s(?:=|\s+)(\S+)" % re.escape(flag), command or "")
+    if not match:
+        return None
+    match = re.match(r"^(\d+(?:\.\d+)?)\s*([KMGT]?)B?$", match.group(1).upper())
+    if not match:
+        return None
+    return int(float(match.group(1)) * _SIZE.get(match.group(2) or "B", 1))
+
+
+class MLXLMLogCollector(KVCollector):
+    """MLX-LM's prompt (KV) cache, read from its own log. mlx_lm.server has no
+    stats endpoint, but logs 'Prompt Cache: <n> sequences, <x> GB' (INFO)
+    before it serves each request. With server_log_path set, the agent tails
+    that file (MLX-LM's stderr, e.g. its LaunchAgent's StandardErrorPath) and
+    reports the latest line: hot used = x GB (10 MB resolution), entries = n,
+    entries capacity = --prompt-cache-size (default 10), capacity =
+    --prompt-cache-bytes when set. The figures describe the cache just before
+    the latest request, not after it. Only these lines are read; nothing else
+    from the log is kept or exported."""
+    source = "mlx-lm"
+
+    def __init__(self, cfg, metrics):
+        KVCollector.__init__(self, cfg, metrics)
+        self.path = os.path.expanduser(cfg["server_log_path"])
+        self.inode, self.offset, self.mtime = None, 0, None
+        self.latest = None
+        self.active = False
+
+    def _read_new(self):
+        """Lines appended since the last poll. A new inode or a shorter file
+        (rotation, truncation) is read from the start; the first poll starts
+        from the last 64 KiB so an old figure is picked up at once."""
+        st = os.stat(self.path)
+        rewritten = st.st_size == self.offset and st.st_mtime_ns != self.mtime
+        if st.st_ino != self.inode or st.st_size < self.offset or rewritten:
+            self.inode = st.st_ino
+            self.offset = max(0, st.st_size - 65536) if self.latest is None else 0
+        self.mtime = st.st_mtime_ns
+        if st.st_size == self.offset:
+            return []
+        with open(self.path, "rb") as handle:
+            handle.seek(self.offset)
+            data = handle.read(min(st.st_size - self.offset, 4194304))
+        cut = data.rfind(b"\n")
+        if cut < 0:
+            return []
+        self.offset += cut + 1
+        return data[:cut].decode("utf-8", "replace").splitlines()
+
+    def poll(self, is_lm, model, command):
+        if not is_lm:
+            if self.active:
+                self.clear(up=0)
+                self.m.kv_up.replace([], source=self.source)
+                self.active = False
+            return
+        if not self.active:
+            self.start_reporting()
+            self.active = True
+        try:
+            lines = self._read_new()
+        except OSError:
+            return self.fail("connect")
+        for line in lines:
+            match = _LM_CACHE_LINE.search(line)
+            if match:
+                self.latest = (int(match.group(1)), float(match.group(2)) * 1e9)
+        if self.latest is None:
+            # Readable, but MLX-LM has not served a request since it started
+            # logging (or logs below INFO): nothing to report yet.
+            self.clear(up=1)
+            return
+        sequences, used = self.latest
+        model = self._model(model)
+        size = _size_from_argv(command, "--prompt-cache-size")
+        self.publish([(used, {"tier": "hot", "model": model})],
+                     {"hot": _size_from_argv(command, "--prompt-cache-bytes")},
+                     [(sequences, {"tier": "hot", "model": model})],
+                     {"hot": size if size else 10}, {"hot_used": True})
+
+
+# --------------------------------------------------------------------------
 # Exporter
 # --------------------------------------------------------------------------
 
 class Exporter:
-    def __init__(self, cfg, metrics):
+    def __init__(self, cfg, metrics, ready=None):
         self.cfg, self.m = cfg, metrics
+        self.ready = ready
         self._last_error_log = None
 
     def export_once(self):
@@ -1199,6 +2093,9 @@ class Exporter:
             return False
 
     def run_forever(self, stop):
+        if self.ready is not None:
+            # Bounded, so a stuck first tick never stops the export.
+            self.ready.wait(max(30.0, 2 * self.cfg["health_check_interval_seconds"]))
         while not stop.wait(self.cfg["export_interval_seconds"]):
             self.export_once()
         self.export_once()
@@ -1209,7 +2106,7 @@ class Exporter:
 # --------------------------------------------------------------------------
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="MLX-LM telemetry agent")
+    parser = argparse.ArgumentParser(description="MLX-LM / MLX-VLM telemetry agent")
     parser.add_argument("--config", help="JSON config file")
     parser.add_argument("--check-config", metavar="FILE", help="validate a config file and exit")
     args = parser.parse_args(argv)
@@ -1235,7 +2132,7 @@ def main(argv=None):
     state = State(cfg)
     stop = threading.Event()
     health = Health(cfg, metrics, state)
-    exporter = Exporter(cfg, metrics)
+    exporter = Exporter(cfg, metrics, health.ready)
     server = None
     if cfg["proxy_enabled"]:
         try:
@@ -1243,7 +2140,7 @@ def main(argv=None):
         except OSError as exc:
             LOG.error("cannot listen on %s:%s: %s", cfg["proxy_host"], cfg["proxy_port"], exc)
             return 1
-        metrics.active.set(0)
+        metrics.active.replace([(0, {"framework": state.framework})])
 
     def shutdown(signum, _frame):
         LOG.info("received signal %s, shutting down", signum)
@@ -1256,9 +2153,9 @@ def main(argv=None):
     threading.Thread(target=health.run_forever, args=(stop,), name="health", daemon=True).start()
     export_thread = threading.Thread(target=exporter.run_forever, args=(stop,), name="export", daemon=True)
     export_thread.start()
-    LOG.info("mlx-telemetry %s started (proxy=%s, hardware=%s, quality=%s, export=%s)", VERSION,
-             cfg["proxy_enabled"], cfg["hardware_metrics_enabled"], cfg["quality_metrics_enabled"],
-             cfg["otlp_endpoint"])
+    LOG.info("mlx-telemetry %s started (framework=%s, proxy=%s, hardware=%s, quality=%s, omlx=%s, export=%s)",
+             VERSION, cfg["framework"], cfg["proxy_enabled"], cfg["hardware_metrics_enabled"],
+             cfg["quality_metrics_enabled"], cfg["omlx_enabled"], cfg["otlp_endpoint"])
     if server is not None:
         server.serve_forever(poll_interval=0.5)
         server.server_close()

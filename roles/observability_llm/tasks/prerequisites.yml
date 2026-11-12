@@ -22,12 +22,15 @@
       - not (llm_metrics_enabled | bool) or (mlx_telemetry_port | int != mlx_server_port | int)
       - mlx_telemetry_port | int != llm_otlp_receiver_port | int
       - llm_otel_endpoint is match('http://(127\.0\.0\.1|localhost|\[::1\]):')
+      - llm_framework in ['auto', 'mlx-lm', 'mlx-vlm']
+      - not (omlx_monitoring_enabled | bool) or omlx_url is match('https?://')
     fail_msg: >-
-      mlx_telemetry_port ({{ mlx_telemetry_port }}) must differ from the MLX-LM
-      server port ({{ mlx_server_port }}) and from the collector's loopback OTLP
+      mlx_telemetry_port ({{ mlx_telemetry_port }}) must differ from the
+      inference server port ({{ mlx_server_port }}) and from the collector's loopback OTLP
       receiver (llm_otlp_receiver_port, {{ llm_otlp_receiver_port | default('undefined') }}),
       and llm_otel_endpoint ({{ llm_otel_endpoint }}) must point at that
-      loopback receiver.
+      loopback receiver. llm_framework ({{ llm_framework }}) must be auto,
+      mlx-lm or mlx-vlm, and omlx_url ({{ omlx_url }}) an http(s):// URL.
 
 - name: Check the Python interpreter for the telemetry agent
   ansible.builtin.command:
@@ -48,31 +51,56 @@
       {{ llm_telemetry_python }} cannot run the MLX telemetry agent (needs
       Python 3.9+, standard library only; rc={{ observability_llm_python.rc }}).
       Set llm_telemetry_python to a working python3, for example the
-      interpreter of the MLX-LM virtual environment.
+      interpreter of the MLX-LM / MLX-VLM virtual environment.
 
 # Runs in this Ansible session on loopback, so it is a deployment sanity check,
 # not a statement about what the LaunchAgent can reach.
-- name: Check that the MLX-LM server answers
+# 401 also proves the server answers: MLX-VLM started with
+# MLX_VLM_SERVER_API_KEY protects /health (see llm_server_api_key_file).
+- name: Check that the inference server answers
   ansible.builtin.uri:
     url: "http://{{ mlx_server_host }}:{{ mlx_server_port }}/health"
     method: GET
-    status_code: 200
+    status_code: [200, 401]
     timeout: 5
   register: observability_llm_mlx_health
   failed_when: false
 
-- name: Assert the MLX-LM server is reachable
+- name: Assert the inference server is reachable
   ansible.builtin.assert:
     that:
-      - observability_llm_mlx_health.status | default(-1) == 200
+      - observability_llm_mlx_health.status | default(-1) in [200, 401]
     fail_msg: >-
-      MLX-LM did not answer http://{{ mlx_server_host }}:{{ mlx_server_port }}/health
+      Nothing answered http://{{ mlx_server_host }}:{{ mlx_server_port }}/health
       (status {{ observability_llm_mlx_health.status | default('none') }}).
-      Start mlx_lm.server (its own LaunchAgent is not managed here), correct
-      mlx_server_host / mlx_server_port for this host, or set
+      Start mlx_lm.server or mlx_vlm.server (its own LaunchAgent is not managed
+      here), correct mlx_server_host / mlx_server_port for this host, or set
       llm_require_mlx_reachable: false to install telemetry anyway; the health
       metrics will then report the server as down.
   when: llm_require_mlx_reachable | bool
+
+# OMLX is optional and never required: a warning, not a failure. /health
+# needs no API key on OMLX; the stats the agent reads do (omlx_api_key_file).
+- name: Check that OMLX answers
+  ansible.builtin.uri:
+    url: "{{ omlx_url | regex_replace('/+$', '') }}/health"
+    method: GET
+    status_code: 200
+    timeout: 5
+  register: observability_llm_omlx_health
+  failed_when: false
+  when: omlx_monitoring_enabled | bool
+
+- name: Warn when OMLX monitoring is enabled but OMLX does not answer
+  ansible.builtin.debug:
+    msg: >-
+      omlx_monitoring_enabled is true but {{ omlx_url }}/health answered
+      {{ observability_llm_omlx_health.status | default('nothing') }}. The agent
+      is installed anyway and reports omlx_up 0 (KV-cache panels show
+      "Unavailable") until OMLX is reachable.
+  when:
+    - omlx_monitoring_enabled | bool
+    - observability_llm_omlx_health.status | default(-1) != 200
 
 - name: Read the rendered collector configuration
   ansible.builtin.slurp:

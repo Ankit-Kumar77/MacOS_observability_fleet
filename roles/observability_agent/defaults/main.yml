@@ -65,6 +65,15 @@ otel_collection_interval: 15s
 # scraped" from "scraped but not exported".
 otel_internal_metrics_port: 18888
 
+# Collector self-monitoring. A prometheus receiver scrapes the collector's own
+# loopback telemetry (otel_internal_metrics_port) and sends it through the
+# normal pipeline, so the "Observability Stack Health" dashboard shows, per
+# Mac, points accepted, sent and failed, exporter queue and the collector's
+# CPU and memory. A collector that cannot export at all cannot report this
+# either; the fleet "host not reporting" alert covers that case.
+otel_self_monitoring_enabled: true
+otel_self_monitoring_interval: 30s
+
 # Network latency from each monitored Mac to the monitoring Mac. The tcp_check
 # receiver times a TCP connect to VictoriaMetrics (monitoring_server_address:
 # victoriametrics_port) every otel_collection_interval - the same host and port

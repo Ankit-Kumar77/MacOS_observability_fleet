@@ -1,8 +1,9 @@
 # Contributing
 
-Thanks for your interest in this project. It is an Ansible project — there is no
-application code and no unit test suite — so most contributions are role tasks,
-templates, variables, or documentation.
+Thanks for your interest in this project. It is an Ansible project: most
+contributions are role tasks, templates, variables or documentation. The one
+piece of application code is the MLX telemetry agent
+(`roles/observability_llm/files/mlx_telemetry.py`), which has a unit test suite.
 
 Please read [CLAUDE.md](CLAUDE.md) before your first change. It records the
 macOS-specific constraints that static checks cannot catch, and most of them were
@@ -24,13 +25,23 @@ that needs root. `-i` is optional. The documentation passes it explicitly for cl
 
 ## Before you open a pull request
 
-Run the same three checks that CI runs, from the repository root:
+Run the same checks that CI runs, from the repository root:
 
 ```bash
 ansible-playbook site.yml --syntax-check
 ansible-inventory -i inventories/production/hosts.yml --list > /dev/null
 ansible-lint
+python3 -m unittest discover -s tests -v
+ansible-playbook tests/render_templates.yml -e render_dir=/tmp/render
+python3 tests/check_dashboards.py /tmp/render
 ```
+
+The telemetry agent must stay standard-library only and Python 3.9
+compatible (macOS `/usr/bin/python3`): run the unit tests with
+`/usr/bin/python3` too, and add a test for every behaviour you change.
+Dashboard and alert changes are described in
+[docs/DASHBOARDS.md](docs/DASHBOARDS.md) and [docs/ALERTING.md](docs/ALERTING.md);
+add an entry to [CHANGELOG.md](CHANGELOG.md) under *Unreleased*.
 
 `ansible-lint` runs the `production` profile and must pass with no findings. Two
 rules are skipped deliberately in `.ansible-lint` and both carry a comment
@@ -47,7 +58,9 @@ the real binaries before opening a pull request:
   each other on spare ports.
 - Query VictoriaMetrics directly for the metric names your change touches.
 - For dashboard changes, run the panel PromQL through Grafana's datasource proxy
-  rather than eyeballing the JSON.
+  rather than eyeballing the JSON: `python3 tests/check_panel_queries.py
+  http://<grafana>:<port> <host_name>` runs every panel query of every
+  dashboard and lists errors and empty panels.
 
 If you cannot test on a Mac, say so in the pull request. A change that has only
 been syntax-checked is still welcome, but it must be labelled as such so it is

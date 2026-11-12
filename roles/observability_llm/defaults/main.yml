@@ -1,13 +1,16 @@
 ---
-# MLX-LM (LLM) observability for monitored Macs that run mlx_lm.server.
+# LLM observability for monitored Macs that run mlx_lm.server or
+# mlx_vlm.server (same OpenAI-compatible API; the framework is detected per
+# host, see llm_framework).
 #
 # Off unless llm_observability_enabled is true for the host (set it in
 # inventory host_vars or a child group of monitored_nodes; the fleet-wide
 # default false lives in group_vars/all.yml). When it is false on a host that
 # had it before, this role unloads and removes only its own LaunchAgent.
 #
-# This role never starts, stops or reconfigures the MLX-LM server itself or its
-# LaunchAgent; mlx_launchagent_label is only read (launchctl print).
+# This role never starts, stops or reconfigures the inference server (MLX-LM,
+# MLX-VLM or OMLX) or its LaunchAgent; mlx_launchagent_label is only read
+# (launchctl print).
 
 # Filesystem and launchd layout: the same values as the other roles, duplicated
 # here like base_dir always is so each role stays self-contained.
@@ -24,15 +27,36 @@ launchd_label_prefix: com.observability.user
 mlx_telemetry_launchd_label: "{{ launchd_label_prefix }}.mlxtelemetry"
 mlx_telemetry_launchd_plist: "{{ launch_agents_dir }}/{{ mlx_telemetry_launchd_label }}.plist"
 
-# The existing MLX-LM server (mlx_lm.server --host/--port). Loopback by default.
+# The existing inference server (mlx_lm.server / mlx_vlm.server --host/--port).
+# Loopback by default.
 mlx_server_host: 127.0.0.1
 mlx_server_port: 8080
-# Label of the LaunchAgent that already runs mlx_lm.server, e.g.
+# Label of the LaunchAgent that already runs the server, e.g.
 # com.example.mlx-lm. Optional: when set, process state and launchd restart
 # counts come from `launchctl print gui|user/<uid>/<label>` (read only);
-# otherwise the process is found by mlx_process_pattern.
+# otherwise the process is found by mlx_process_pattern (MLX-LM) or
+# mlx_vlm_process_pattern (MLX-VLM). With the default patterns only a Python
+# interpreter or the server's entry point counts as the server process.
 mlx_launchagent_label: ""
 mlx_process_pattern: 'mlx_lm(\.server\b|\s+server\b|/server\.py\b)'
+mlx_vlm_process_pattern: 'mlx_vlm(\.server\b|\s+server\b|/server(/__main__)?\.py\b)'
+# Which server runs on this Mac: auto, mlx-lm or mlx-vlm. auto identifies the
+# server answering on mlx_server_port (MLX-VLM's Server header, MLX-LM's
+# /health shape), else the server process found; it reports "unknown" rather
+# than guess. Set it per host only when detection is ambiguous, e.g. a server
+# behind another proxy or started from a custom wrapper script.
+llm_framework: auto
+# Optional file (0600, first line = key) holding the server's API key, sent
+# as a Bearer token on the agent's own /health, /v1/models and probe requests.
+# Needed for MLX-VLM started with MLX_VLM_SERVER_API_KEY, which then answers
+# those endpoints with 401. Client requests through the proxy keep their own
+# Authorization header and never use this key.
+llm_server_api_key_file: ""
+# MLX-VLM's own KV (prefix) cache, GET /v1/cache/stats on the same server,
+# polled every llm_models_check_interval while the node runs MLX-VLM. Its
+# cache is off unless the server runs with APC_ENABLED=1; it is then reported
+# as disabled, not as zeros. MLX-LM has no such endpoint.
+llm_vlm_cache_stats_enabled: true
 # Local model directory, used only to read config.json for the maximum context
 # length. Leave empty for Hugging Face repositories (the HF cache is searched)
 # or when llm_model_max_context_tokens is set.
@@ -84,6 +108,42 @@ llm_model_name: ""
 # 0 = read max_position_embeddings from the model's config.json when found.
 llm_model_max_context_tokens: 0
 llm_model_label_max_values: 10
+# Tool (function) names become a label on mlx_tool_calls_by_tool_total. They
+# come from the model's output, so they are sanitised and capped: names past
+# this many distinct values are counted as "other".
+llm_tool_label_max_values: 50
+
+# Optional token confidence from the logprobs of the sampled tokens: mean and
+# lowest token probability, perplexity, share of low-probability tokens. A
+# measure of how sure the model was, not of whether it was right.
+# Responses are scored when the client asked for logprobs. With
+# llm_confidence_inject_logprobs, the proxy also asks MLX-LM for them on
+# non-streaming requests and strips them from the reply (byte-identical to the
+# reply without them). MLX-LM returns no logprobs on streams, so streaming
+# requests are never scored. Costs a little generation speed when injecting.
+llm_confidence_metrics_enabled: false
+llm_confidence_inject_logprobs: false
+llm_confidence_low_token_probability: 0.5
+llm_confidence_low_response_ratio: 0.2
+
+# Optional MLX-LM KV (prompt) cache figures. mlx_lm.server has no stats API,
+# but logs "Prompt Cache: <n> sequences, <x> GB" before each request. Set this
+# to the file its stderr goes to (e.g. the StandardErrorPath of its
+# LaunchAgent) and the agent reports those figures as source="mlx-lm". Only
+# those lines are read. The file must be readable by the deployment user.
+mlx_server_log_path: ""
+
+# Optional KV-cache figures from an OMLX server on this Mac (OMLX is not
+# installed or managed here). The agent polls OMLX's admin stats,
+# GET <omlx_url>/admin/api/stats, which needs OMLX's main API key as a Bearer
+# token unless OMLX runs loopback-only with authentication disabled. Put the
+# key in a 0600 file on the Mac and set omlx_api_key_file to its path; it is
+# never copied into the agent's config. See docs/LLM_OBSERVABILITY.md.
+omlx_monitoring_enabled: false
+omlx_url: "http://127.0.0.1:8000"
+omlx_api_key_file: ""
+omlx_poll_interval: 30
+omlx_timeout: 5
 
 # 1 = alert when this node serves no requests for the inactivity window
 # (server role: llm_alert_inactivity_minutes).

@@ -1,0 +1,80 @@
+{#- Managed by Ansible. Observability Stack Health: watches the watchers. Per-Mac
+    collector delivery (otelcol_* from the prometheus/self receiver,
+    otel_self_monitoring_enabled), VictoriaMetrics itself (vm_*, written by
+    -selfScrapeInterval, job="victoriametrics"), the MLX telemetry agents, and
+    the freshness of every signal. -#}
+{% import 'dashboard_macros.j2' as m %}
+{% set H = 'host_name=~"$host"' %}
+{% set VM = 'job="victoriametrics"' %}
+{% set ri = '[$__rate_interval]' %}
+{
+  {{ m.header(grafana_stack_dashboard_uid, "Observability Stack Health",
+      "Is the monitoring itself working? Per-Mac collector delivery and resource use, VictoriaMetrics ingestion and storage, telemetry agents, and how fresh each signal is.",
+      ["platform", "otel", "victoriametrics"],
+      [{"title": "Observability Home", "url": "/d/" ~ grafana_home_dashboard_uid}]) }},
+  "templating": {
+    "list": [
+      {{ m.query_var("host", "Host", "label_values(system_memory_usage_bytes, host_name)", "Macs whose collector reports host metrics.") }}
+    ]
+  },
+  "panels": [
+    {{ m.row(1, "Signal freshness", 0) }},
+    {{ m.table(2, "Last report per Mac", [
+        {"expr": 'time() - max by (host_name) (timestamp(system_memory_usage_bytes{' ~ H ~ '}))'},
+        {"expr": 'time() - max by (host_name) (timestamp(tcpcheck_status_ratio{' ~ H ~ '}))'},
+        {"expr": 'time() - max by (host_name) (timestamp(ssh_sessions{' ~ H ~ '}))'},
+        {"expr": 'time() - max by (host_name) (timestamp(otelcol_process_uptime_total{' ~ H ~ '}))'},
+        {"expr": 'time() - max by (host_name) (timestamp(mlx_telemetry_up{' ~ H ~ '}))'},
+        {"expr": 'max by (host_name) (otelcol_process_uptime_total{' ~ H ~ '})'}], 0, 1, h=8,
+        desc="Seconds since the latest sample of each signal, per Mac (instant queries look back 5 minutes, so a silent signal shows as empty). Host metrics and latency come from the collector, SSH state from the sshstate agent, LLM from the MLX telemetry agent.",
+        no_value="No hosts reporting",
+        organize={"excludeByName": {"Time": true}, "renameByName": {"host_name": "Mac", "Value #A": "Host metrics age", "Value #B": "Latency check age", "Value #C": "SSH state age", "Value #D": "Collector self-metrics age", "Value #E": "LLM telemetry age", "Value #F": "Collector uptime"}},
+        overrides=[{"matcher": {"id": "byRegexp", "options": ".* age"}, "properties": [{"id": "unit", "value": "s"}, {"id": "decimals", "value": 0}, {"id": "custom.cellOptions", "value": {"type": "color-text"}}, {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "green", "value": None}, {"color": "orange", "value": 60}, {"color": "red", "value": 180}]}}]},
+                   {"matcher": {"id": "byName", "options": "Collector uptime"}, "properties": [{"id": "unit", "value": "s"}, {"id": "decimals", "value": 0}]},
+                   {"matcher": {"id": "byName", "options": "Mac"}, "properties": [{"id": "links", "value": [{"title": "Open ${__value.raw} in Mac Mini Detail", "url": "/d/" ~ grafana_detail_dashboard_uid ~ "?var-host_name=${__value.raw:percentencode}&${__url_time_range}"}]}]}]) }},
+
+    {{ m.row(3, "OpenTelemetry Collector (per Mac)", 9) }},
+    {{ m.ts(4, "Metric points sent / s", [{"expr": 'sum by (host_name) (rate(otelcol_exporter_sent_metric_points_total{' ~ H ~ '}' ~ ri ~ '))', "legend": m.lg('host_name')}], 0, 10, w=8, min=0,
+        desc="Points each collector delivered to VictoriaMetrics.", no_value="Collector self-monitoring off") }},
+    {{ m.ts(5, "Metric points failed / s", [{"expr": 'sum by (host_name) (rate(otelcol_exporter_send_failed_metric_points_total{' ~ H ~ '}' ~ ri ~ '))', "legend": m.lg('host_name')}], 8, 10, w=8, min=0,
+        desc="Points the exporter could not deliver after retries (dropped). Any value here means data loss; see the collector's error log on that Mac.", no_value="No failures") }},
+    {{ m.ts(6, "Points accepted vs refused by receivers / s", [{"expr": 'sum by (host_name) (rate(otelcol_receiver_accepted_metric_points_total{' ~ H ~ '}' ~ ri ~ '))', "legend": m.lg('host_name') ~ " accepted"}, {"expr": 'sum by (host_name) (rate(otelcol_receiver_refused_metric_points_total{' ~ H ~ '}' ~ ri ~ ')) > 0', "legend": m.lg('host_name') ~ " refused"}], 16, 10, w=8, min=0,
+        desc="Points entering each collector's pipeline (host metrics, latency, SSH state, LLM telemetry).", no_value="Collector self-monitoring off") }},
+    {{ m.ts(7, "Exporter queue fill", [{"expr": '100 * max by (host_name) (otelcol_exporter_queue_size{' ~ H ~ '}) / max by (host_name) (otelcol_exporter_queue_capacity{' ~ H ~ '})', "legend": m.lg('host_name')}], 0, 18, w=8, unit="percent", min=0, max=100,
+        desc="Batches waiting to be sent. A queue that fills up means VictoriaMetrics is unreachable or slow; at 100% new data is dropped.", no_value="Collector self-monitoring off") }},
+    {{ m.ts(8, "Collector CPU", [{"expr": '100 * max by (host_name) (rate(otelcol_process_cpu_seconds_total{' ~ H ~ '}' ~ ri ~ '))', "legend": m.lg('host_name')}], 8, 18, w=8, unit="percent", min=0,
+        desc="CPU used by each collector process (100 = one core).", no_value="Collector self-monitoring off") }},
+    {{ m.ts(9, "Collector memory (RSS)", [{"expr": 'max by (host_name) (otelcol_process_memory_rss{' ~ H ~ '})', "legend": m.lg('host_name')}], 16, 18, w=8, unit="bytes", min=0,
+        desc="Resident memory of each collector process.", no_value="Collector self-monitoring off") }},
+
+    {{ m.row(10, "VictoriaMetrics (monitoring Mac)", 26) }},
+    {{ m.stat(11, "Active series", 'max(vm_cache_entries{' ~ VM ~ ', type="storage/hour_metric_ids"})', 0, 27, w=4, decimals=0, desc="Series that received samples in the last hour.", no_value="VM self-monitoring off") }},
+    {{ m.stat(12, "Ingestion rate", 'sum(rate(vm_rows_inserted_total{' ~ VM ~ '}[5m]))', 4, 27, w=4, unit="short", decimals=0, desc="Samples written per second, all protocols.", no_value="VM self-monitoring off") }},
+    {{ m.stat(13, "Storage used", 'sum(vm_data_size_bytes{' ~ VM ~ '})', 8, 27, w=4, unit="bytes", decimals=1, desc="On-disk size of the stored data (retention: " ~ victoriametrics_retention ~ ").", no_value="VM self-monitoring off") }},
+    {{ m.stat(14, "Free disk for storage", 'min(vm_free_disk_space_bytes{' ~ VM ~ '})', 12, 27, w=4, unit="bytes", decimals=1, spec=[["red", None], ["orange", 5368709120], ["green", 21474836480]], desc="Free space on the volume holding the VictoriaMetrics data directory.", no_value="VM self-monitoring off") }},
+    {{ m.stat(15, "VictoriaMetrics uptime", 'max(vm_app_uptime_seconds{' ~ VM ~ '})', 16, 27, w=4, unit="s", decimals=0, desc="Time since VictoriaMetrics started. LaunchAgents are not started at boot: a short uptime after a reboot means the server play was re-run.", no_value="VM self-monitoring off") }},
+    {{ m.stat(16, "Slow inserts", '100 * sum(rate(vm_slow_row_inserts_total{' ~ VM ~ '}[15m])) / sum(rate(vm_rows_added_to_storage_total{' ~ VM ~ '}[15m]))', 20, 27, w=4, unit="percent", decimals=2, spec=[["green", None], ["orange", 5], ["red", 10]], desc="Share of inserts that missed the in-memory index (new series churn or too little RAM).", no_value="VM self-monitoring off") }},
+    {{ m.ts(17, "Rows ingested / s by protocol", [{"expr": 'sum by (type) (rate(vm_rows_inserted_total{' ~ VM ~ '}' ~ ri ~ '))', "legend": m.lg('type')}], 0, 31, w=8, min=0,
+        desc="opentelemetry = the collectors' OTLP pushes; promscrape = VictoriaMetrics' own metrics.", no_value="VM self-monitoring off") }},
+    {{ m.ts(18, "Queries / s by path", [{"expr": 'sum by (path) (rate(vm_http_requests_total{' ~ VM ~ ', path=~".*/api/v1/(query|query_range|series|labels|label/.*)"}' ~ ri ~ '))', "legend": m.lg('path')}, {"expr": 'sum(rate(vm_http_request_errors_total{' ~ VM ~ '}' ~ ri ~ '))', "legend": "errors"}], 8, 31, w=8, min=0,
+        desc="Read traffic (mostly Grafana) and HTTP errors.", no_value="VM self-monitoring off") }},
+    {{ m.ts(19, "VictoriaMetrics memory (Go runtime)", [{"expr": 'max(go_memstats_sys_bytes{' ~ VM ~ '})', "legend": "obtained from the OS"}, {"expr": 'max(go_memstats_heap_inuse_bytes{' ~ VM ~ '})', "legend": "heap in use"}], 16, 31, w=8, unit="bytes", min=0,
+        desc="Memory the VictoriaMetrics process obtained from macOS and its live heap. On macOS VictoriaMetrics does not export process RSS or CPU (those come from Linux /proc); see the Mac Mini Detail dashboard for the monitoring Mac's totals.", no_value="VM self-monitoring off") }},
+    {{ m.ts(20, "Stored data and series churn", [{"expr": 'sum(vm_data_size_bytes{' ~ VM ~ '})', "legend": "data size"}, {"expr": 'sum(rate(vm_new_timeseries_created_total{' ~ VM ~ '}[1h])) * 3600', "legend": "new series / hour"}], 0, 39, w=12, unit="bytes", min=0,
+        desc="Disk growth and the rate of brand-new series. Churn (for example SSH sessions or new model names) adds index work.", no_value="VM self-monitoring off",
+        overrides=[{"matcher": {"id": "byName", "options": "new series / hour"}, "properties": [{"id": "unit", "value": "short"}, {"id": "custom.axisPlacement", "value": "right"}]}]) }},
+    {{ m.ts(21, "Series by metric family (top 10)", [{"expr": 'topk(10, count by (family) (label_replace({__name__=~"(system|ssh|tcpcheck|mlx|macos|otelcol)_.+"}, "family", "$1", "__name__", "([a-z]+)_.*")))', "legend": m.lg('family')}], 12, 39, w=12, min=0,
+        desc="Live series per metric prefix: where the storage cost comes from.", no_value="No data") }},
+
+{% if grafana_llm_dashboards_enabled | bool %}
+    {{ m.row(22, "MLX telemetry agents", 47) }},
+    {{ m.table(23, "Telemetry agents", [
+        {"expr": 'max by (host_name, version, framework, proxy, quality, confidence) (mlx_telemetry_info{' ~ H ~ '})'},
+        {"expr": 'sum by (host_name) (increase(mlx_telemetry_export_failures_total{' ~ H ~ '}[1h]))'}], 0, 48, h=7,
+        desc="Agent version and enabled features per node, and OTLP exports to the local collector that failed in the last hour.", no_value="No LLM telemetry",
+        organize={"excludeByName": {"Time": true, "Value #A": true}, "renameByName": {"host_name": "Node", "version": "Agent version", "framework": "Framework", "proxy": "Proxy", "quality": "Quality heuristics", "confidence": "Confidence", "Value #B": "Export failures (1 h)"}},
+        overrides=[{"matcher": {"id": "byName", "options": "Export failures (1 h)"}, "properties": [{"id": "decimals", "value": 0}, {"id": "custom.cellOptions", "value": {"type": "color-text"}}, {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "green", "value": None}, {"color": "red", "value": 1}]}}]}]) }},
+{% endif %}
+    {{ m.text(24, "", "**Reading this dashboard.** Collector panels need `otel_self_monitoring_enabled` (default on) and VictoriaMetrics panels `victoriametrics_self_scrape_interval` (default 30s). A Mac whose collector cannot reach VictoriaMetrics at all (for example blocked by macOS Local Network Privacy) cannot report its own failures either: it shows up as a stale row in *Last report per Mac* and fires the *Mac stopped reporting* alert.", 0, 55, w=24, h=3) }}
+  ]
+}

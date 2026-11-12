@@ -1,0 +1,20 @@
+{#- Managed by Ansible. Alerts Overview: live state of every Grafana-managed rule
+    provisioned by this project (fleet_alerts.yml, llm_alerts.yml). The
+    alert-list panels read Grafana's alerting state directly, so this
+    dashboard needs no metrics of its own. Runbooks: docs/ALERTING.md. -#}
+{% import 'dashboard_macros.j2' as m %}
+{
+  {{ m.header(grafana_alerts_dashboard_uid, "Alerts Overview",
+      "Every alert rule provisioned by this project and its live state: firing, pending, and the full list of rules by folder. Runbooks are in docs/ALERTING.md.",
+      ["platform", "alerts"],
+      [{"title": "Alert rules", "url": "/alerting/list"}, {"title": "Observability Home", "url": "/d/" ~ grafana_home_dashboard_uid}],
+      refresh="30s", time_from="now-24h") }},
+  "templating": {"list": []},
+  "panels": [
+    {{ m.alertlist(1, "Firing", 0, 0, w=12, h=10, states={"firing": true}, desc="Rules whose condition is met and whose 'for' period has elapsed.") }},
+    {{ m.alertlist(2, "Pending", 12, 0, w=12, h=10, states={"pending": true}, desc="Rules whose condition is met but whose 'for' period has not elapsed yet.") }},
+    {{ m.alertlist(3, "Fleet rules (all states)", 0, 10, w=12, h=14, states={"firing": true, "pending": true, "normal": true, "noData": true, "error": true}, group_mode="default", folder=grafana_fleet_alert_folder, max_items=100, desc="Host-level rules: Macs not reporting, CPU, memory, disk, latency, SSH and collector delivery.") }},
+    {{ m.alertlist(4, "LLM rules (all states)", 12, 10, w=12, h=14, states={"firing": true, "pending": true, "normal": true, "noData": true, "error": true}, group_mode="default", folder=grafana_llm_alert_folder, max_items=100, desc="MLX-LM / MLX-VLM rules, including the SLO burn-rate rules. Present only when LLM observability is enabled on some node.") }},
+    {{ m.text(5, "", "**Notifications.** Rules use Grafana's default notification policy. No contact point is provisioned by this project, so nothing is delivered until you add one (Alerting → Contact points), keeping its webhook or credentials out of Git. Severity labels: `critical` = act now, `warning` = act within the working day. See docs/ALERTING.md for every rule's meaning and first steps.", 0, 24, w=24, h=3) }}
+  ]
+}

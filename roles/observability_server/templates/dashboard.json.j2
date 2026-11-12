@@ -15,13 +15,16 @@
 {
   "uid": "{{ grafana_fleet_dashboard_uid }}",
   "title": "Mac Mini Fleet Overview",
-  "tags": ["macos", "otel", "hostmetrics"],
+  "description": "Every Mac at a glance: CPU, memory, disk, network, load, latency to the monitoring Mac and SSH access. Click a series or a host name to open it in Mac Mini Detail.",
+  "tags": ["observability", "fleet", "macos", "otel", "hostmetrics"],
   "timezone": "browser",
+  "graphTooltip": 1,
   "schemaVersion": 39,
   "version": 1,
   "refresh": "30s",
   "time": {"from": "now-6h", "to": "now"},
   "links": [
+    {"type": "dashboards", "title": "Dashboards", "tags": ["observability"], "asDropdown": true, "includeVars": false, "keepTime": true, "targetBlank": false, "icon": "external link", "url": "", "tooltip": ""},
     {
       "type": "link",
       "title": "Mac Mini Detail",

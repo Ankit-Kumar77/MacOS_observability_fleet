@@ -1,8 +1,8 @@
-name: lint
+name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, LaunchAgent]
   pull_request:
 
 jobs:
@@ -23,3 +23,32 @@ jobs:
         run: ansible-inventory -i inventories/production/hosts.yml --list > /dev/null
       - name: Lint
         run: ansible-lint
+
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # The telemetry agent must run on macOS's /usr/bin/python3 (3.9).
+          python-version: '3.9'
+      - name: Telemetry agent unit and contract tests
+        run: python -m unittest discover -s tests -v
+
+  dashboards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install tooling
+        run: pip install ansible
+      - name: Render every dashboard and alert-rule template
+        run: ansible-playbook tests/render_templates.yml -e render_dir=${{ runner.temp }}/render
+      - name: Check rendered dashboards and rules
+        run: python tests/check_dashboards.py ${{ runner.temp }}/render
+      - name: Render without LLM observability
+        run: ansible-playbook tests/render_templates.yml -e render_dir=${{ runner.temp }}/render-nollm -e render_llm=false
+      - name: Check the non-LLM render
+        run: python tests/check_dashboards.py ${{ runner.temp }}/render-nollm

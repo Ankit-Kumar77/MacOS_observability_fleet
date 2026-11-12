@@ -114,7 +114,7 @@ The full endpoint includes the inventory-derived monitoring-server address and `
 
 ## 9. Grafana
 
-Grafana is the visualization layer. The server role provisions a VictoriaMetrics datasource and two dashboards. **Mac Mini Fleet Overview** shows every host on shared panels (CPU, memory, disk, network, load, latency to the monitoring Mac) with a **Mac Mini** selector to narrow them. Clicking a host's series or its name in the Hosts table opens **Mac Mini Detail**, one reusable dashboard that takes the host as a variable.
+Grafana is the visualization layer. The server role provisions a VictoriaMetrics datasource, 11 dashboards in three folders (Platform, Fleet, LLM; catalogue in [DASHBOARDS.md](DASHBOARDS.md)) and the alert rules in [ALERTING.md](ALERTING.md). **Observability Home** is Grafana's start page; **Observability Stack Health** shows whether every Mac's collector is delivering. The two host dashboards are the core of the fleet view. **Mac Mini Fleet Overview** shows every host on shared panels (CPU, memory, disk, network, load, latency to the monitoring Mac) with a **Mac Mini** selector to narrow them. Clicking a host's series or its name in the Hosts table opens **Mac Mini Detail**, one reusable dashboard that takes the host as a variable.
 
 Grafana's configuration is rendered under `~/tools/observability/etc/grafana`, its application is under `~/tools/observability/grafana`, and its service listens on port `3000` by default.
 

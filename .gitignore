@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# ansible-lint / ansible-test caches
+.ansible/
+
+# Rendered templates from tests/render_templates.yml
+tests/.rendered/

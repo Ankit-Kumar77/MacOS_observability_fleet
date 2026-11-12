@@ -4,15 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-An Ansible project (no application code, no unit tests) that deploys host-metric observability to a fleet of Apple Silicon Mac Minis. One Mac runs VictoriaMetrics + Grafana; every other Mac runs an OpenTelemetry Collector.
+An Ansible project that deploys host-metric observability to a fleet of Apple Silicon Mac Minis. One Mac runs VictoriaMetrics + Grafana; every other Mac runs an OpenTelemetry Collector. The only application code is the optional MLX telemetry agent (`roles/observability_llm/files/mlx_telemetry.py`, Python standard library), which has unit tests in `tests/`.
 
 **This branch is the LaunchAgent / no-sudo variant** (`feat/launchagent-no-sudo`, based on `main`). It needs no sudo/admin rights: everything installs under the connecting user's home (`~/tools/observability`) and runs as per-user **LaunchAgents** in `~/Library/LaunchAgents`, loaded into the `user/<uid>` launchd domain (or `gui/<uid>`). It keeps every `main` feature, including SSH observability, which now runs unprivileged with documented partial session visibility. The system-level variant (root LaunchDaemons, `/opt/observability`) is `main`. `docs/LAUNCHAGENT_VARIANT.md` is the authoritative comparison: lifecycle, SSH capability matrix, side-by-side mode.
 
-**Status:** the full playbook has been run unprivileged on one Apple Silicon Mac (macOS 27) over `ansible_connection: local` (see the README "Validation" section for what passed). First real side-by-side run (MM7 server, MM4 worker): the server stack worked; the worker collector could not export, consistent with macOS Local Network Privacy (see below). Not yet verified on Mac Minis: deployment over real SSH, agents surviving the end of the SSH session, logout/login and reboot behaviour (LaunchAgents are not started at boot), SSH state against a real `com.openssh.sshd` with live sessions, and side-by-side mode against a real running system-level stack. Do not describe those as working until they have been tested.
+**Status:** the full playbook has been run unprivileged on one Apple Silicon Mac (macOS 27) over `ansible_connection: local` (see the README "Validation status" section for what passed; the latest round covered agent 1.3.0, the 11 dashboards and 28 rules against a real `mlx_lm.server` 0.31.3). First real side-by-side run (MM7 server, MM4 worker): the server stack worked; the worker collector could not export, consistent with macOS Local Network Privacy (see below). Not yet verified on Mac Minis: deployment over real SSH, agents surviving the end of the SSH session, logout/login and reboot behaviour (LaunchAgents are not started at boot), SSH state against a real `com.openssh.sshd` with live sessions, and side-by-side mode against a real running system-level stack. Do not describe those as working until they have been tested.
 
 ## Commands
 
-Ansible is **not installed** on this machine. Install the full `ansible` package, not bare `ansible-core`: `ansible.cfg` sets `stdout_callback = yaml`, which ships in `community.general`, and without that collection every `ansible-playbook` run aborts with `Could not load 'yaml' callback plugin`. `ansible.cfg` also sets the inventory and `roles_path`, and sets `become = False` (both plays in `site.yml` also set `become: false`), so `-i` is optional but used explicitly throughout the docs.
+Use the full `ansible` package, not bare `ansible-core`: `ansible.cfg` sets `stdout_callback = yaml`, which ships in `community.general`, and without that collection every `ansible-playbook` run aborts with `Could not load 'yaml' callback plugin`. `ansible.cfg` also sets the inventory and `roles_path`, and sets `become = False` (both plays in `site.yml` also set `become: false`), so `-i` is optional but used explicitly throughout the docs.
 
 ```bash
 ansible all -m ping                      # connectivity
@@ -35,6 +35,12 @@ ansible-playbook -i inventories/production/hosts.yml site.yml -e observability_s
 
 # Health/verification tasks only
 ansible-playbook -i inventories/production/hosts.yml site.yml --tags verify
+
+# Tests (CI runs the first three)
+python3 -m unittest discover -s tests -v                       # MLX telemetry agent; also run with /usr/bin/python3 (3.9)
+ansible-playbook tests/render_templates.yml -e render_dir=/tmp/render   # render every dashboard + rule file
+python3 tests/check_dashboards.py /tmp/render                  # JSON, unique ids, no overlaps, refIds, rule uids
+python3 tests/check_panel_queries.py http://<grafana> <host>   # every panel query against live data
 ```
 
 Add `--ask-vault-pass` only if you have re-enabled auth with vaulted credentials (see "Secrets" below).
@@ -58,14 +64,15 @@ Because this variant needs no sudo, the whole playbook can also be run against t
 
 | Group | Role | Installs |
 | --- | --- | --- |
-| `monitoring_server` (exactly one host) | `observability_server` | VictoriaMetrics, Grafana, datasource + dashboard provisioning, 2 LaunchAgents |
-| `monitored_nodes` (N hosts) | `observability_agent` | `otelcol-contrib`, host-metric + latency pipeline, SSH state script, 2 LaunchAgents |
-| `monitored_nodes` (second role of the same play) | `observability_llm` | Optional MLX-LM / MLX-VLM telemetry agent (proxy + health + framework detection + unprivileged hardware readings + optional OMLX KV-cache poll), 1 LaunchAgent. No-op unless `llm_observability_enabled` is true for the host; when turned off it removes only its own LaunchAgent. See `docs/LLM_OBSERVABILITY.md`. |
+| `monitoring_server` (exactly one host) | `observability_server` | VictoriaMetrics (with `-selfScrapeInterval`), Grafana, datasource, 11 dashboards in 3 folders, fleet + LLM alert rules, 2 LaunchAgents |
+| `monitored_nodes` (N hosts) | `observability_agent` | `otelcol-contrib`, host-metric + latency + collector self-monitoring pipeline, SSH state script, 2 LaunchAgents |
+| `monitored_nodes` (second role of the same play) | `observability_llm` | Optional MLX-LM / MLX-VLM telemetry agent 1.3.0 (proxy with response kinds, finish reasons, per-tool calls and optional logprob confidence + health + framework detection + model config.json + unprivileged hardware readings + KV cache from MLX-LM's log, MLX-VLM or OMLX), 1 LaunchAgent. No-op unless `llm_observability_enabled` is true for the host; when turned off it removes only its own LaunchAgent. See `docs/LLM_OBSERVABILITY.md`. |
 
 Metric path — deliberately **no Prometheus server and no node_exporter**:
 
 ```
-hostmetrics + tcp_check + otlp_json_file(SSH state) -> resourcedetection -> batch -> otlphttp (basic auth)
+hostmetrics + tcp_check + otlp_json_file(SSH state) + prometheus/self (collector's own 18888) [+ otlp/llm]
+  -> resourcedetection -> batch -> otlphttp (basic auth)
   -> http://<monitoring_server_address>:8428/opentelemetry/v1/metrics  (VictoriaMetrics)
   -> Grafana (datasource type `prometheus`, uid `victoriametrics`, localhost:8428)
 ```
@@ -89,9 +96,18 @@ Three rules keep this safe, and all three are load-bearing:
 - **The shared plist is referenced as `{{ role_path }}/../observability_common/templates/launchd_agent.plist.j2`.** Ansible resolves a bare `src:` against the *calling* role's `templates/`, which would not find it.
 - **`launchd_restart.yml` is pulled into handlers with `ansible.builtin.include_tasks: file: "{{ role_path }}/../observability_common/tasks/launchd_restart.yml"`, not `include_role`.** Ansible rejects `include_role`/`import_role` as a handler action outright ("Using 'ansible.builtin.include_role' as a handler is not supported"); only task-level includes work there. `launchd_ensure_started.yml` has no such restriction and is included the normal `include_role` + `tasks_from` way from each role's install task, since those are ordinary tasks, not handlers.
 
-`ProgramArguments` for each daemon are lists in that role's `defaults/main.yml`, so they are documented and overridable rather than buried in XML. VictoriaMetrics builds its list as `victoriametrics_base_arguments + (victoriametrics_auth_arguments if victoriametrics_auth_enabled else [])`.
+`ProgramArguments` for each daemon are lists in that role's `defaults/main.yml`, so they are documented and overridable rather than buried in XML. VictoriaMetrics builds its list as `victoriametrics_base_arguments + victoriametrics_self_scrape_arguments (when victoriametrics_self_scrape_interval is set) + victoriametrics_auth_arguments (when victoriametrics_auth_enabled)`.
 
 Everything lands under `base_dir` (default `{{ ansible_facts['user_dir'] }}/tools/observability`), owned by the connecting user; no task sets `owner`/`group`. Plists go to `launch_agents_dir` (`~/Library/LaunchAgents`). LaunchAgent labels are `{{ launchd_label_prefix }}.<service>` with prefix `com.observability.user`: `.victoriametrics`, `.grafana`, `.otelcol`, `.sshstate` (periodic). They are deliberately distinct from the system-level `com.observability.<service>` labels, which appear only in `observability_legacy_daemon_labels` for read-only detection. The path, launchd and label variables are duplicated in both roles' `defaults/main.yml`, like `base_dir` always was.
+
+### Dashboards and alert rules (server role)
+
+- **One catalogue:** `observability_server_dashboards` (template, folder, uid, `llm`) drives rendering, removal when LLM is off, folder creation and verification. Add a dashboard there, never as its own task.
+- **Folders** come from the provider's `foldersFromFilesStructure`: files go to `provisioning/dashboards/<Platform|Fleet|LLM>/`. Files from the old flat layout (`observability_server_legacy_dashboard_files`) are deleted *before* rendering, so Grafana never sees one uid twice.
+- **Home dashboard** is set by `grafana.ini` `[dashboards] default_home_dashboard_path`; `/api/dashboards/home` then answers with a `redirectUri`, not a dashboard body.
+- **`dashboard_macros.j2`** (formerly `llm_dashboard_macros.j2`) is shared by every dashboard except the two host dashboards: `header` (tags `observability`, `graphTooltip`, Dashboards menu), `query_var`, `framework_var`, `stat`, `ts`, `table`, `bargauge`, `alertlist`, `dashlist`, `text`, KV sections. Legends use `m.lg('label')`.
+- **Alert files** `fleet_alerts.yml.j2` (always) and `llm_alerts.yml.j2` share one pattern: a `specs` list → rules, `noDataState: OK`, `runbook_url` → `docs/ALERTING.md#<uid>` (each rule has an `<a id>` there), `deleteRules` when disabled. SLO burn-rate rules are appended to the LLM specs from `llm_slo_*`; the SLO dashboard uses the same SLI expressions. Keep both in sync.
+- **`tests/render_templates.yml`** loads role defaults with `include_vars`, which outranks play vars: the LLM flags are therefore forced with `set_fact`.
 
 ### Variable layout
 
@@ -147,6 +163,11 @@ These are the things that make this project different from the same stack on Lin
 - **Node-level health and process series carry `framework`** and are relabelled in place on a framework change (`Gauge.relabel`), never re-created, so no series without the label or with the old framework lingers. Dashboard queries on them use `HF` (host + `$framework`); host metrics have no framework label and take `H`, joined with `m.fw_join()` for comparisons.
 - **Grafana does not start if an alerting provisioning file is invalid** — not just unparseable, also semantically (e.g. `__dashboardUid__` without `__panelId__`). `llm_alerts.yml.j2` is therefore rendered as JSON from a data structure and `json.load`-validated before install; test any rule change against the pinned Grafana before shipping it. Removing a provisioning file does not delete provisioned rules, which is why the disabled state renders `deleteRules`.
 - **No `become` anywhere.** `ansible.cfg` sets `become = False`, each play sets `become: false`, and `preflight.yml` fails on uid 0 or `ansible_become`. Do not add tasks that need root; there is no way to satisfy them in this environment.
+- **Self-monitoring metric names (measured, 0.159.0 + VictoriaMetrics 1.101.0).** The collector's internal telemetry is exported `without_type_suffix`/`without_units`; after the prometheus receiver and VictoriaMetrics' OTLP naming, counters get `_total` back but units do not: `otelcol_exporter_sent_metric_points_total`, `otelcol_exporter_send_failed_metric_points_total` (exists only after a first failure), `otelcol_receiver_accepted_metric_points_total`, `otelcol_exporter_queue_size` / `_capacity`, `otelcol_process_cpu_seconds_total`, **`otelcol_process_memory_rss`** and **`otelcol_process_uptime_total`** (no `_bytes`/`_seconds`). VictoriaMetrics' self-scrape is `job="victoriametrics", instance="self"`, and **on macOS it exports no `process_resident_memory_bytes` / `process_cpu_seconds_total`** (Linux `/proc` only): use `go_memstats_*`.
+- **Histogram `le` labels** from OTLP are formatted like `%g` (`"2"`, `"0.5"`). SLO thresholds must be agent bucket bounds; templates format them with `'%g' % x`.
+- **Zero vs empty in ratios.** `sum(x{outcome="bad"}) / sum(x)` is *empty* when there were no bad events. Write `(sum(bad) or vector(0)) / sum(all)` (or `or 0 * sum by (...) (all)` when grouped) wherever 0 is the true answer.
+- **MLX-LM logprobs (mlx-lm 0.31).** Only non-streaming responses carry them. With `top_logprobs`, MLX-LM reports `dict(top[0], ...)` from an *unsorted* `argpartition`, i.e. not the sampled token's logprob: such replies are not scored. MLX-LM serialises replies with plain `json.dumps`, which is why re-serialising after deleting `choices[].logprobs` is byte-identical; do not inject on other frameworks. MLX-LM streams each tool call complete in one delta, OpenAI-style servers split them, hence counting only fragments with a name or id.
+- **MLX-LM prompt cache** is only in its log (`Prompt Cache: <n> sequences, <x> GB`, INFO, before each request). The reader (`MLXLMLogCollector`) handles rotation, truncation and same-size rewrites (mtime), and reads at most the last 64 KiB on first start.
 - **Inventory holds `REPLACE_WITH_*` placeholders by design.** Never commit real addresses, SSH users, or credentials.
 - `.ansible-lint` runs the `production` profile. `var-naming[no-role-prefix]` is deliberately skipped — see the comment there.
 
@@ -165,4 +186,4 @@ When VictoriaMetrics auth is enabled, the collector, the Grafana datasource and 
 
 ## Reference docs
 
-`docs/LLM_OBSERVABILITY.md` (optional MLX-LM / MLX-VLM telemetry: proxy, framework detection, OMLX KV cache, metric definitions, dashboards, alerts, unavailable metrics, rollback), `docs/LAUNCHAGENT_VARIANT.md` (this variant vs `main`, LaunchAgent lifecycle, SSH capability matrix, side-by-side mode, operations), `docs/PROJECT_FLOW.md` (internal flow + mermaid diagrams), `docs/KT_GUIDE.md` (onboarding walkthrough and FAQ), `docs/RESOURCE_FOOTPRINT.md` (measured disk figures). `LAUNCHD_TROUBLESHOOTING.md` is referenced historically but does not exist in the repository. These describe implementation specifics — keep them in sync when changing role behaviour.
+`docs/DASHBOARDS.md` (every dashboard and panel, conventions, how to add one), `docs/ALERTING.md` (every rule with a runbook, SLO definitions, notifications), `CHANGELOG.md`, `SECURITY.md`, `docs/LLM_OBSERVABILITY.md` (optional MLX-LM / MLX-VLM telemetry: proxy, framework detection, OMLX KV cache, metric definitions, dashboards, alerts, unavailable metrics, rollback), `docs/LAUNCHAGENT_VARIANT.md` (this variant vs `main`, LaunchAgent lifecycle, SSH capability matrix, side-by-side mode, operations), `docs/PROJECT_FLOW.md` (internal flow + mermaid diagrams), `docs/KT_GUIDE.md` (onboarding walkthrough and FAQ), `docs/RESOURCE_FOOTPRINT.md` (measured disk figures). `LAUNCHD_TROUBLESHOOTING.md` is referenced historically but does not exist in the repository. These describe implementation specifics — keep them in sync when changing role behaviour.

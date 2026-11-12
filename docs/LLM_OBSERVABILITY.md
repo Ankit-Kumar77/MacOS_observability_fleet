@@ -6,7 +6,7 @@ Optional monitoring for Mac Minis that serve models with `mlx_lm.server` or `mlx
 - the dashboards are provisioned into the existing Grafana;
 - nothing needs sudo, and there is no Prometheus server or node_exporter.
 
-**Status:** validated on one Apple Silicon Mac (macOS 27.0.1), as an unprivileged user over `ansible_connection: local`. That run used a real `mlx_lm.server` 0.32.2 serving `mlx-community/SmolLM2-135M-Instruct-8bit`. MLX-VLM support was then validated the same way against real `mlx_lm.server` 0.32.2 (Qwen3-4B-Instruct-2507-4bit) and `mlx_vlm.server` 0.7.11 (SmolVLM-256M-Instruct); the OMLX adapter has only been tested against a stub of OMLX's documented stats endpoint, not a real OMLX. See [Validation](#validation). It has not been tested on the Mac Minis, with production models, or with real client applications.
+**Status:** validated on one Apple Silicon Mac (macOS 27.0.1), as an unprivileged user over `ansible_connection: local`. That run used a real `mlx_lm.server` 0.32.2 serving `mlx-community/SmolLM2-135M-Instruct-8bit`. MLX-VLM support was then validated the same way against real `mlx_lm.server` 0.32.2 (Qwen3-4B-Instruct-2507-4bit) and `mlx_vlm.server` 0.7.11 (SmolVLM-256M-Instruct); the OMLX adapter has only been tested against a stub of OMLX's documented stats endpoint, not a real OMLX. Agent 1.3.0 (response kinds, finish reasons, per-tool calls, token confidence, model architecture, MLX-LM prompt cache from its log) was validated the same way against `mlx_lm.server` 0.31.3 with Qwen3-4B-Instruct-2507-4bit. See [Validation](#validation). It has not been tested on the Mac Minis, with production models, or with real client applications.
 
 ## Architecture
 
@@ -14,12 +14,14 @@ Optional monitoring for Mac Minis that serve models with `mlx_lm.server` or `mlx
 client app ──HTTP──▶ MLX telemetry proxy (127.0.0.1:18080) ──▶ mlx_lm.server or mlx_vlm.server (127.0.0.1:8080)
                          │  timing, status, usage, MLX-VLM timings (no content kept)
                          │  + health checks + framework detection + unprivileged hardware readings
-                         │  + optional: GET <omlx_url>/admin/api/stats (OMLX KV cache)
+                         │  + model config.json (architecture, weights, KV sizing)
+                         │  + optional: token confidence from logprobs, MLX-LM log (prompt cache),
+                         │    GET <omlx_url>/admin/api/stats (OMLX KV cache)
                          ▼  OTLP/HTTP JSON, loopback
                   existing otelcol-contrib (receiver otlp/llm on 127.0.0.1:14318)
                          │  resourcedetection (host_name), batch
                          ▼  existing otlphttp exporter
-                  VictoriaMetrics ──▶ Grafana: 3 LLM dashboards + 10 alert rules
+                  VictoriaMetrics ──▶ Grafana: 6 LLM dashboards + 17 alert rules
 ```
 
 | Piece | Where | What it is |
@@ -105,9 +107,12 @@ OMLX wraps MLX-LM and MLX-VLM itself and is not claimed by `http` detection; if 
 | Prompt, completion, cached tokens | yes | yes | both report `prompt_tokens_details.cached_tokens` |
 | Missing usage | yes | yes | `mlx_requests_usage_missing_total` |
 | Server-reported timings (prompt time, generation rate) | **not exposed** | yes | `mlx_server_reported_*` |
-| Tool calls, temperature, context utilisation | yes | yes | |
+| Tool calls (total and per function name), temperature, context utilisation | yes | yes | |
+| Finish reasons, response kind (chat, reasoning, tool call, completion) | yes | yes | agent 1.3.0 |
+| Token confidence (logprobs) | yes, non-streaming | when the server returns logprobs | MLX-LM returns none on streams; injection only on MLX-LM |
+| Model architecture, weights size, KV bytes per token | yes | yes | from `config.json` (`text_config` for VLMs) |
 | Quality heuristics (optional) | yes | yes | computed from text output, same method |
-| KV cache | **not exposed** | yes, when the server runs with `APC_ENABLED=1` | `mlx_kv_cache_*{source="mlx-vlm"}`; OMLX adds `source="omlx"` |
+| KV cache | from its log, with `mlx_server_log_path` (size and sequences) | yes, when the server runs with `APC_ENABLED=1` | `mlx_kv_cache_*{source="mlx-lm"\|"mlx-vlm"}`; OMLX adds `source="omlx"` |
 | Image content | n/a | forwarded byte for byte, never logged | |
 
 ## Enable on a node
@@ -152,7 +157,7 @@ Like the other agents, the telemetry agent is **not started at boot**. After a r
 | `llm_framework` | `auto` | `auto`, `mlx-lm` or `mlx-vlm`. See [MLX-LM and MLX-VLM](#mlx-lm-and-mlx-vlm). |
 | `llm_server_api_key_file` | `""` | 0600 file whose first line is the server's API key, sent on the agent's own `/health`, `/v1/models` and probe requests (MLX-VLM with `MLX_VLM_SERVER_API_KEY`). Only the path is rendered into the agent's config. |
 | `llm_vlm_cache_stats_enabled` | `true` | Poll MLX-VLM's prefix-cache stats on MLX-VLM nodes (no effect on MLX-LM nodes). |
-| `omlx_monitoring_enabled` | `false` | Poll OMLX for KV-cache figures. See [KV cache (OMLX)](#kv-cache-mlx-vlm-prefix-cache-omlx). |
+| `omlx_monitoring_enabled` | `false` | Poll OMLX for KV-cache figures. See [KV cache (OMLX)](#kv-cache-mlx-lm-log-mlx-vlm-prefix-cache-omlx). |
 | `omlx_url` / `omlx_api_key_file` | `http://127.0.0.1:8000` / `""` | OMLX's address, and a 0600 file holding OMLX's main API key (not needed when OMLX runs loopback-only with authentication disabled). |
 | `omlx_poll_interval` / `omlx_timeout` | `30` / `5` | Seconds between polls; request timeout. |
 | `mlx_model_path` / `llm_hf_cache_dir` | `""` | Where to find the model's `config.json`, for its maximum context length. A Hugging Face repo is looked up in `$HF_HUB_CACHE`, `$HF_HOME/hub` or `~/.cache/huggingface/hub`. |
@@ -167,6 +172,11 @@ Like the other agents, the telemetry agent is **not started at boot**. After a r
 | `llm_hardware_metrics_enabled` / `llm_hardware_interval` | `true` / `15` | Unprivileged hardware readings. |
 | `llm_quality_metrics_enabled` | `false` | Text heuristics, plus their thresholds and weights. |
 | `llm_activity_expected` | `false` | Enables the "no inference activity" alert for this node. |
+| `llm_tool_label_max_values` | `50` | Cardinality cap for the `tool` label; later new function names are counted as `other`. |
+| `llm_confidence_metrics_enabled` | `false` | Token confidence from logprobs. See [Token confidence](#token-confidence-optional-llm_confidence_metrics_enabled). |
+| `llm_confidence_inject_logprobs` | `false` | Ask MLX-LM for logprobs on non-streaming requests that did not ask for them, and strip them from the reply. |
+| `llm_confidence_low_token_probability` / `llm_confidence_low_response_ratio` | `0.5` / `0.2` | A token is low-confidence below this probability; a response is low-confidence when at least this share of its tokens are. |
+| `mlx_server_log_path` | `""` | MLX-LM's log file (its stderr, e.g. the `StandardErrorPath` of its LaunchAgent), for prompt-cache figures. See [KV cache](#kv-cache-mlx-lm-log-mlx-vlm-prefix-cache-omlx). |
 | `llm_telemetry_python` | Ansible's own interpreter on the host | Any Python 3.9 or later works, including `/usr/bin/python3`. |
 | `llm_require_mlx_reachable` | `true` | Fails the play if MLX-LM `/health` does not answer at deploy time. |
 | `llm_otel_endpoint` / `llm_export_interval` | the loopback receiver / `15` | Where and how often the agent exports. |
@@ -175,7 +185,8 @@ Like the other agents, the telemetry agent is **not started at boot**. After a r
 
 **Monitoring Mac** (`roles/observability_server/defaults/main.yml`):
 - `grafana_llm_dashboards_enabled` and `grafana_llm_alerts_enabled` are derived from the inventory; set them explicitly to override.
-- The dashboard UIDs are `llm-cluster-overview`, `llm-node-detail` and `llm-performance-quality`.
+- The dashboard UIDs are `llm-cluster-overview`, `llm-node-detail`, `llm-performance-quality`, `llm-slo`, `llm-traffic-tools` and `llm-model-capacity`.
+- The SLO settings are `llm_slo_window` (30d), `llm_slo_availability_target` (99.5), `llm_slo_latency_target` (95), `llm_slo_ttft_seconds` (2), `llm_slo_request_seconds` (30), `llm_slo_fast_burn_rate` (14.4) and `llm_slo_slow_burn_rate` (6); see [ALERTING.md](ALERTING.md#service-level-objectives).
 - The alert thresholds are `llm_alert_ttft_p95_seconds` (5), `llm_alert_generation_p95_seconds` (120), `llm_alert_error_rate_percent` (5), `llm_alert_min_requests` (5), `llm_alert_inactivity_minutes` (60), `llm_alert_memory_pressure_level` (2), `llm_alert_restarts_per_15m` (2), `llm_alert_stale_minutes` (10) and `llm_alert_thermal_state` (2).
 
 ## Metrics
@@ -202,7 +213,9 @@ Label sets used below:
 | `mlx_request_context_utilization` | histogram | model | Context tokens ÷ maximum context. Recorded only when the maximum is known. |
 | `mlx_requests_usage_missing_total` | counter | model, endpoint, stream | Successful requests without usage. Their tokens are not estimated. |
 | `mlx_request_temperature` | histogram | model | `temperature`, only when the client set it explicitly. |
-| `mlx_tool_calls_total` | counter | model | Tool calls returned by MLX-LM. |
+| `mlx_tool_calls_total` | counter | model | Tool calls returned by MLX-LM. Streamed calls split over several deltas count once (only fragments carrying a function name or id are counted). |
+| `mlx_tool_calls_by_tool_total` | counter | model, tool | The same calls per function name. Names are sanitised (`[A-Za-z0-9._:-]`, 64 characters) and capped by `llm_tool_label_max_values`; `unknown` = a call without a name. |
+| `mlx_responses_total` | counter | model, endpoint, stream, kind, finish_reason | Each successful response. `kind`: `tool_call` (the model called a tool), `reasoning` (reasoning/thinking text, no tool call), `chat`, or `completion` (legacy endpoint). `finish_reason`: `stop`, `length` (hit `max_tokens` or the context limit), `tool_calls`, `content_filter`, `function_call`, `other`, or `none` when the server sent none. |
 | `mlx_request_last_success_timestamp_seconds` | gauge | model | Unix time of the last successful request. |
 | `mlx_upstream_connection_failures_total` | counter | reason (`connect`, `read`, `timeout`), framework | Times the proxy could not reach MLX-LM or read from it. |
 | `mlx_proxy_passthrough_requests_total` | counter | – | Unmeasured requests that were forwarded anyway, such as `/v1/models`. |
@@ -232,6 +245,10 @@ Every series in this table except `mlx_model_*` carries the node's `framework` l
 | `mlx_model_info{model, source}` | Always 1. `source` is `config`, `process` or `models_api`. |
 | `mlx_framework_info{framework, source}` | Always 1. See [MLX-LM and MLX-VLM](#mlx-lm-and-mlx-vlm). |
 | `mlx_model_context_length_max{model}` | `max_position_embeddings` (or a similar key) from `config.json`, or `llm_model_max_context_tokens`. |
+| `mlx_model_config{model, attr}` | Architecture figures from `config.json` (language model's `text_config` for VLMs): `layers`, `attention_heads`, `kv_heads`, `head_dim`, `hidden_size`, `intermediate_size`, `vocab_size`, `quant_bits`, `quant_group_size`. Read once per model. |
+| `mlx_model_architecture{model, architecture, model_type, quantization}` | Always 1: `architectures[0]`, `model_type` and e.g. `4-bit`. |
+| `mlx_model_kv_cache_per_token_bytes{model}` | Estimated KV-cache bytes per token: 2 × layers × KV heads × head dim × 2 bytes. Assumes an fp16 cache with full attention on every layer, so it is an upper bound for sliding-window or linear-attention models and for quantised KV caches. |
+| `mlx_model_weights_size_bytes{model}` | Total size of the model's `*.safetensors` files. |
 | `mlx_telemetry_up`, `mlx_telemetry_info{version, proxy, hardware, quality, omlx, framework}`, `mlx_telemetry_export_failures_total`, `mlx_activity_expected` | The agent's own status. |
 
 ### Hardware (unprivileged sources only)
@@ -246,12 +263,13 @@ Every series in this table except `mlx_model_*` carries the node's `framework` l
 
 CPU, memory, disk, network and load come from the existing `hostmetrics` pipeline and are reused, not collected again.
 
-### KV cache (MLX-VLM prefix cache, OMLX)
+### KV cache (MLX-LM log, MLX-VLM prefix cache, OMLX)
 
-One metric family, `mlx_kv_cache_*`, labelled by **`source`**: the same panels show both sources, and the dashboards' KV sections work for either. **MLX-LM exposes no KV-cache statistics** over HTTP (0.32.2), so MLX-LM nodes report none.
+One metric family, `mlx_kv_cache_*`, labelled by **`source`**: the same panels show every source, and the dashboards' KV sections work for any of them. MLX-LM exposes no KV-cache statistics over HTTP, but it logs its prompt cache, which the agent can read.
 
 | `source` | Where it comes from | When |
 | --- | --- | --- |
+| `mlx-lm` | MLX-LM's prompt (KV) cache, from the line `Prompt Cache: <n> sequences, <x> GB` it logs at INFO before serving each request (mlx-lm 0.31). The agent tails `mlx_server_log_path` from its end (rotation and truncation handled) and reads only those lines. Reported: hot used = x GB (10 MB resolution), entries = n, entries capacity = `--prompt-cache-size` (MLX-LM's default 10), capacity = `--prompt-cache-bytes` when set (both from the server's command line). The figures describe the cache **just before** the latest request. | Only with `mlx_server_log_path` set, on nodes whose framework is `mlx-lm`. The file must be readable by the deployment user; a missing file counts as `reason="connect"`. No hit/miss or eviction counts (the per-request `cached_tokens` is the reuse signal). |
 | `mlx-vlm` | MLX-VLM's Automatic Prefix Cache (APC): `GET /v1/cache/stats` on the same server, with `llm_server_api_key_file` if set | On nodes whose framework is `mlx-vlm`, every `llm_models_check_interval`, unless `llm_vlm_cache_stats_enabled: false`. APC is **off by default** in MLX-VLM (the server's `APC_ENABLED=1` turns it on); with it off, the node reports `mlx_kv_cache_enabled{source="mlx-vlm"} 0` and no figures, never zeros. |
 | `omlx` | [OMLX](https://github.com/jundot/omlx)'s documented admin endpoint `GET <omlx_url>/admin/api/stats` (Bearer = OMLX's main API key from `omlx_api_key_file`) | Only with `omlx_monitoring_enabled: true`. OMLX is optional and never installed or managed here. Only `runtime_cache` and `uptime_seconds` are read; the same response also carries OMLX's own API key and local paths, which are never read, exported or logged. |
 
@@ -294,6 +312,25 @@ Each successful response of at least 20 words is scored in memory, from at most 
 
 The resulting metrics are `mlx_quality_evaluations_total`, `mlx_quality_flags_total{flag}`, `mlx_quality_flagged_responses_total`, `mlx_quality_repetition` (histogram), `mlx_quality_heuristic_risk_score` (histogram) and `mlx_quality_last_heuristic_risk_score`, all labelled by `model` and `framework`.
 
+### Token confidence (optional, `llm_confidence_metrics_enabled`)
+
+How sure the model was of the tokens it sampled, from their log-probabilities. **It says nothing about whether the answer is right**: a model can be confidently wrong. It is useful for spotting drift (a new model, quantisation or prompt template making the model less sure), prompts the model struggles with, and sampling settings that produce erratic output.
+
+Responses are scored when they carry logprobs:
+- **`source="client"`**: the client asked for `logprobs`; the reply is passed through unchanged.
+- **`source="injected"`**: with `llm_confidence_inject_logprobs`, the proxy adds `"logprobs": true` to non-streaming MLX-LM requests that did not ask, and removes the `logprobs` blocks from the reply. MLX-LM serialises with Python's `json.dumps` defaults, so the reply the client receives is byte-identical to the one MLX-LM sends without logprobs (verified against real MLX-LM, ids and timestamps aside). MLX-LM computes each sampled token's logprob anyway, so the cost is small, but measure it on your model. Injection is MLX-LM only, because only its output format is known.
+
+Not scored: streaming responses (MLX-LM returns no logprobs on streams), and MLX-LM replies in `top_logprobs` mode, where MLX-LM reports an entry of an unsorted top-k partition instead of the sampled token's logprob.
+
+| Metric | Definition |
+| --- | --- |
+| `mlx_confidence_scored_total{model, framework, source}` | Responses scored. |
+| `mlx_confidence_mean_token_probability` (histogram) | Mean of exp(logprob) over the sampled tokens of a response. |
+| `mlx_confidence_min_token_probability` (histogram) | Probability of the least likely sampled token. |
+| `mlx_confidence_perplexity` (histogram) | exp(−mean logprob); 1 = certain of every token. |
+| `mlx_confidence_low_token_ratio` (histogram) | Share of tokens below `llm_confidence_low_token_probability`. |
+| `mlx_confidence_low_confidence_responses_total` | Responses whose low-token share reached `llm_confidence_low_response_ratio`. |
+
 **Groundedness is not evaluated**, because there is no reference source or evaluator. To add one, compute it inside `ProxyHandler._record` in `files/mlx_telemetry.py`, where the response text is available in memory, and export it as a new `mlx.quality.*` metric.
 
 ### Data hygiene
@@ -306,7 +343,8 @@ The resulting metrics are `mlx_quality_evaluations_total`, `mlx_quality_flags_to
 
 | Metric | Why not |
 | --- | --- |
-| KV-cache size, utilisation, cached-sequence count, evictions **without OMLX** | `mlx_lm.server` 0.32.2 exposes none of these over HTTP, and this project does not patch MLX-LM or MLX-VLM (MLX-LM exposes none; MLX-VLM's prefix cache and OMLX do, see [KV cache (OMLX)](#kv-cache-mlx-vlm-prefix-cache-omlx)). With OMLX, see that section; allocated-vs-used and in-flight KV memory stay unavailable there too. The `--prompt-cache-size`/`--prompt-cache-bytes` flags set limits, but their current usage is not reported. A utilisation figure would need both, so none is estimated, and certainly not from host memory. The prompt-cache reuse figure (`mlx_tokens_prompt_cached_total`) is the cache signal MLX-LM does report. Extension point: an `mlx.kv_cache.*` gauge in the agent, once MLX-LM exposes it. |
+| MLX-LM KV-cache hit/miss counts and evictions; size without `mlx_server_log_path` | `mlx_lm.server` exposes no KV-cache statistics over HTTP, and this project does not patch it. Its log gives size and sequence count only (see [KV cache](#kv-cache-mlx-lm-log-mlx-vlm-prefix-cache-omlx)); utilisation is computed only when `--prompt-cache-bytes` sets a capacity, never estimated from host memory. The per-request reuse signal is `mlx_tokens_prompt_cached_total`. Allocated-vs-used and in-flight KV memory are unavailable from every source. |
+| Token confidence of streaming responses | MLX-LM returns logprobs only on non-streaming responses. Turning streams into non-streaming requests would change what clients receive, so they are not scored. |
 | GPU frequency; CPU, GPU and ANE power | These come from `powermetrics`, which requires root, or from the private IOReport API. This variant runs without sudo and uses only supported, unprivileged sources, so `macos_hardware_metric_available` reports them as 0. |
 | TTFT and generation duration for non-streaming requests | A non-streaming response arrives only after generation is complete and says nothing about when its first token was generated, so the proxy records whole-request latency (`mlx_request_duration_seconds{stream="false"}`) instead. MLX-VLM's own `timings` (server-reported prompt time and generation rate) are exported separately as `mlx_server_reported_*` and are not called TTFT. |
 | Tokens/s for non-streaming MLX-LM requests | Neither a first-token time nor server timings exist, so none is computed. |
@@ -315,7 +353,7 @@ The resulting metrics are `mlx_quality_evaluations_total`, `mlx_quality_flags_to
 
 ## Dashboards
 
-All three dashboards use the existing datasource (uid `victoriametrics`). They have `$host`, `$model` and `$framework` (mlx-lm / mlx-vlm / unknown) variables (`$host` is single-value on the node dashboard), link to each other, and leave the two host dashboards unchanged. There are no separate MLX-VLM dashboards: both frameworks share every panel. Panels that show a node's current framework use only `mlx_framework_info` samples newer than 90 s, so a node that switched framework is not counted under both for VictoriaMetrics' 5-minute lookback (keep `llm_export_interval` well below that).
+All six dashboards are in the Grafana folder **LLM** and use the existing datasource (uid `victoriametrics`). Panel-by-panel reference: [DASHBOARDS.md](DASHBOARDS.md). They have `$host`, `$model` and `$framework` (mlx-lm / mlx-vlm / unknown) variables (`$host` is single-value on the node dashboard), link to each other, and leave the two host dashboards unchanged. There are no separate MLX-VLM dashboards: both frameworks share every panel. Panels that show a node's current framework use only `mlx_framework_info` samples newer than 90 s, so a node that switched framework is not counted under both for VictoriaMetrics' 5-minute lookback (keep `llm_export_interval` well below that).
 
 | Dashboard (uid) | Sections |
 | --- | --- |
@@ -323,11 +361,15 @@ All three dashboards use the existing datasource (uid `victoriametrics`). They h
 | **LLM Node Detail** (`llm-node-detail`) | **Status:** node, model, health, process, time since last health OK, requests, telemetry age. **Hardware gauges:** load, memory, pressure, footprint, disk, GPU utilisation and memory, thermal, plus availability tiles. **Hardware time series.** **LLM performance.** **Troubleshooting:** failures, latency spikes (p99), restarts, health-check failures, memory pressure against active requests, and memory, footprint and latency on one axis. **Framework and KV cache (OMLX):** framework and how it was detected, OMLX status, hot/SSD KV used, capacity and utilisation, non-streaming latency with MLX-VLM's server-reported prompt time, KV used vs capacity, utilisation (and MLX-VLM block pool), hit ratio and evictions. **Server details:** model API, server uptime, restarts, server CPU, inference probe, MLX-LM / MLX-VLM process counts, request duration p50/p90/p95/p99, health-check duration. |
 | **LLM Performance, KV Cache and Quality** (`llm-performance-quality`) | **Performance.** **Context and KV cache:** context used against the maximum, utilisation, maximum context, prompt-cache reuse, and KV cache marked not instrumented. **Quality heuristics:** method, evaluations, flags, risk p95 and latest, repetition p95, groundedness marked not evaluated, flags/min, risk over time. **Frameworks:** requests, streaming TTFT and decode rate by framework; non-streaming request latency; MLX-VLM's server-reported generation rate and prompt time. **KV cache (OMLX):** status, hot/SSD used, capacity and utilisation, used vs capacity, utilisation, hit ratio and evictions, entries, and which figures the sources do not report (allocated vs used). **Framework comparison:** request duration p95, tokens (prompt, completion, cached), requests without usage, error rate, generation duration p95 and heuristic risk p95, each by framework. Streaming TTFT, end-to-end and non-streaming latency panels show p50/p90/p95/p99. |
 
+| **LLM Service Levels (SLO)** (`llm-slo`) | Availability and latency SLIs over `llm_slo_window`, error budget left, budget allowance, multi-window burn rates, trends against objectives, per-node SLI table. See [ALERTING.md](ALERTING.md#service-level-objectives). |
+| **LLM Traffic, Tools and Outcomes** (`llm-traffic-tools`) | Requests, responses, tool calls, distinct tools, truncation and reasoning shares; responses by kind, requests by mode, in flight; finish reasons, outcomes, truncation rate, status codes; tool calls per function (time series, table with share, top 10); tokens, tokens per request, prompt-cache reuse. |
+| **LLM Model, Capacity and Confidence** (`llm-model-capacity`) | Architecture, max context, weights, KV per token and at max context; per-node memory fit (footprint, free memory, KV tokens and full-context sequences that still fit); footprint vs weights, GPU memory; context use; KV cache from every source; token confidence. |
+
 Quantiles always come from `histogram_quantile` over `_bucket` series; there are no percentiles derived from averages. Empty panels state why, for example "No streaming requests", "Heuristics disabled" or "Max context unknown".
 
 ## Alerts
 
-Grafana provisions these from `etc/grafana/provisioning/alerting/llm_alerts.yml` into the folder **LLM Observability**. All use `noDataState: OK`, so an absent optional metric never fires an alert. Missing telemetry has its own rule.
+Grafana provisions these from `etc/grafana/provisioning/alerting/llm_alerts.yml` into the folder **LLM Observability**. Runbooks for every rule, the SLO definitions and the fleet (host) rules are in [ALERTING.md](ALERTING.md). All use `noDataState: OK`, so an absent optional metric never fires an alert. Missing telemetry has its own rule.
 
 Every rule carries `host_name` and `framework`, so one rule covers MLX-LM and MLX-VLM nodes and the notification names both (summaries read `<host> (<framework>)`). Rules on per-node series without a framework label (memory pressure, thermal state, activity, export failures) take it from the node's live `mlx_framework_info`; nodes whose agent predates framework detection still alert, without the label. Rule uids are unchanged; titles are framework-neutral and the `component` label is `mlx`.
 
@@ -346,6 +388,7 @@ Every rule carries `host_name` and `framework`, so one rule covers MLX-LM and ML
 | LLM telemetry missing or stale (`llm-telemetry-stale`) | The node reported within the last hour but not now. |
 | Thermal pressure on an LLM node (`llm-thermal-pressure`) | Thermal state is at or above `llm_alert_thermal_state`, only where it is collected. |
 | LLM telemetry export failing (`llm-telemetry-export-failing`, new) | At least `llm_alert_export_failures_per_15m` (3) failed OTLP exports to the local collector in 15 minutes. |
+| LLM availability / time-to-first-token SLO burning fast or slow (`llm-slo-{availability,ttft}-{fast,slow}-burn`, 1.3.0) | Multi-window burn rate above `llm_slo_fast_burn_rate` (14.4, 1 h and 5 m, critical) or `llm_slo_slow_burn_rate` (6, 6 h and 30 m, warning), with at least `llm_alert_min_requests` requests. |
 
 **Notifications:** this repository has no notification integration, so these rules use Grafana's default notification policy and its default (unconfigured) email contact point. To get notified, add a contact point in Grafana, or provision one under `provisioning/alerting/`, and keep its webhook or credentials out of Git, for example in Ansible Vault.
 
@@ -403,7 +446,7 @@ Use port 8428 instead of 8429 when not running side by side.
 | Framework shows `unknown` | Nothing answers `/health` on `mlx_server_port` and no server process was found: start the server or fix the port. If a server runs but cannot be identified (custom wrapper, another proxy in between), set `llm_framework` for the host. |
 | MLX-VLM shows as down although it serves requests | It runs with `MLX_VLM_SERVER_API_KEY`, so `/health` answers 401: set `llm_server_api_key_file`. |
 | Inference probe failing on MLX-VLM | The probe needs the served model's id: check `mlx_model_info`, or set `llm_model_name`. |
-| KV cache tile says "No KV-cache source", "Disabled on server" or "Poll failing" | MLX-LM nodes have no KV source. On MLX-VLM, "Disabled on server" means the server runs without `APC_ENABLED=1`. For OMLX set `omlx_monitoring_enabled`. "Poll failing": check `mlx_kv_cache_scrape_failures_total{source, reason}` (`auth` = missing or rotated key, `connect` = server not running or wrong URL). |
+| KV cache tile says "No KV-cache source", "Disabled on server" or "Poll failing" | On MLX-LM set `mlx_server_log_path` (its log file must be readable by the deployment user; "Poll failing" = it is not). On MLX-VLM, "Disabled on server" means the server runs without `APC_ENABLED=1`. For OMLX set `omlx_monitoring_enabled`. "Poll failing": check `mlx_kv_cache_scrape_failures_total{source, reason}` (`auth` = missing or rotated key, `connect` = server not running or wrong URL). |
 | Max context "Unknown" | Set `llm_model_max_context_tokens`, `mlx_model_path` or `llm_hf_cache_dir`. |
 
 ## Disable or roll back
@@ -412,7 +455,7 @@ Set `llm_observability_enabled: false` for the host (or remove the setting), the
 - unloads `com.observability.user.mlxtelemetry` and deletes its plist;
 - re-renders the collector config without `otlp/llm`, identical to the config before this feature, and restarts the collector.
 
-On the monitoring Mac, once no node has the feature enabled, it removes the three LLM dashboards and rewrites the alert file as a `deleteRules` list, so Grafana deletes the rules.
+On the monitoring Mac, once no node has the feature enabled, it removes the six LLM dashboards and rewrites the alert file as a `deleteRules` list, so Grafana deletes the rules.
 
 Host metrics, the existing dashboards and MLX-LM itself are not touched. The agent's program and config files stay under `~/tools/observability` and can be deleted by hand. To roll back the repository change, revert the commit and re-run both plays.
 
@@ -465,6 +508,16 @@ Same Mac and constraints, with two workers at once: the Ansible-deployed node (`
 - **Alerts:** all 13 expressions evaluated and carried `framework`.
 - **Framework lifecycle:** stopping MLX-VLM gave `framework="unknown"`, `mlx_server_up 0`; restarting it gave `mlx-vlm` again.
 - **Bugs found and fixed while testing:** (1) the first export could run before the first detection, leaving short-lived `framework="unknown"` series, and the first probe used the wrong route; (2) with a stopped server, another MLX server on the same Mac (other port) was taken as this node's; (3) a join without aggregation failed (422) while series of the previous agent version were still in the lookback window.
+
+### Agent 1.3.0: responses, tools, confidence, model and MLX-LM KV cache
+
+Same Mac (macOS 27, uid 501, no sudo), full playbook over `ansible_connection: local` with scratch paths and ports, real `mlx_lm.server` 0.31.3 serving `mlx-community/Qwen3-4B-Instruct-2507-4bit` with `--prompt-cache-size 4` and its stderr in a file (`mlx_server_log_path`), confidence (with injection), quality heuristics and the inference probe enabled.
+
+- **Static checks:** syntax check and `ansible-lint` (production profile) pass; the agent compiles under `/usr/bin/python3` 3.9 and is pyflakes-clean; all 11 dashboards render to valid JSON with unique panel ids and no overlapping panels (`tests/check_dashboards.py`).
+- **Unit and contract tests:** 18 in `tests/test_mlx_telemetry.py`, against a fake MLX-LM built from its server code: injected logprobs scored and stripped byte-identically, client logprobs kept, nothing injected by default, finish reasons and kinds, tool names (streamed and not, fragments not double-counted, label cap), MLX-LM `top_logprobs` mode not scored, confidence maths, architecture from a Qwen3 and a VLM-style config, the prompt-cache log reader (latest line, partial lines, rotation, same-size rewrite, missing file, framework change).
+- **Real MLX-LM:** with equal cache state, the reply through the proxy with injected logprobs was byte-identical to MLX-LM's direct reply (ids and timestamps aside); a client's own `logprobs` were kept. Non-streamed and streamed tool calls were counted per function name; `finish_reason=length` was recorded for a truncated answer. Architecture (36 layers, 8 KV heads, head dim 128, 4-bit), KV per token (147,456 bytes), weights (2.26 GB) and MLX-LM's prompt cache (size, sequences, capacity 4 from `--prompt-cache-size`) reached VictoriaMetrics.
+- **Playbook:** `failed=0` on both plays; the second run `changed=0`.
+- **Dashboards and alerts:** 444 panel queries across the 11 dashboards through Grafana's datasource proxy, 0 errors; under traffic every panel of LLM Service Levels and LLM Traffic returned data. 28 rules (17 LLM, 11 fleet) loaded with health `ok`.
 
 **Not yet tested:**
 - Two physical Mac Minis (the second worker was simulated on one Mac, see above), deployment over SSH.

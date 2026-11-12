@@ -49,6 +49,11 @@ victoriametrics_install_dir: "{{ bin_dir }}/victoria-metrics-{{ victoriametrics_
 # VictoriaMetrics deletes data older than this. Its own default is 1 month,
 # which is easy to be surprised by; set it explicitly.
 victoriametrics_retention: "90d"
+# VictoriaMetrics writes its own metrics (ingestion rate, active series, disk
+# use, slow inserts) into itself at this interval, labelled
+# job="victoriametrics", for the "Observability Stack Health" dashboard.
+# Empty disables self-monitoring.
+victoriametrics_self_scrape_interval: "30s"
 # User-owned and separate from the system-level /opt/observability data, so
 # the two stacks can never share a storage directory.
 victoriametrics_data_dir: "{{ var_dir }}/victoriametrics"
@@ -80,10 +85,68 @@ grafana_llm_overview_dashboard_uid: llm-cluster-overview
 grafana_llm_node_dashboard_uid: llm-node-detail
 grafana_llm_performance_dashboard_uid: llm-performance-quality
 grafana_llm_alert_folder: LLM Observability
-observability_server_llm_dashboards:
-  - llm_cluster_overview
-  - llm_node_detail
-  - llm_performance_quality
+grafana_llm_slo_dashboard_uid: llm-slo
+grafana_llm_traffic_dashboard_uid: llm-traffic-tools
+grafana_llm_model_dashboard_uid: llm-model-capacity
+grafana_home_dashboard_uid: observability-home
+grafana_stack_dashboard_uid: observability-stack-health
+grafana_alerts_dashboard_uid: observability-alerts
+
+# Every provisioned dashboard. Grafana's file provider maps the folder
+# (provisioning/dashboards/<folder>/) to a Grafana folder. llm: true ones are
+# provisioned only with grafana_llm_dashboards_enabled and removed otherwise.
+# The uid of each dashboard is fixed in its template, so moving one between
+# folders keeps its URL.
+observability_server_dashboards:
+  - {template: home, folder: Platform, llm: false, uid: "{{ grafana_home_dashboard_uid }}"}
+  - {template: stack_health, folder: Platform, llm: false, uid: "{{ grafana_stack_dashboard_uid }}"}
+  - {template: alerts_overview, folder: Platform, llm: false, uid: "{{ grafana_alerts_dashboard_uid }}"}
+  - {template: dashboard, file: mac_minis, folder: Fleet, llm: false, uid: "{{ grafana_fleet_dashboard_uid }}"}
+  - {template: dashboard_detail, file: mac_mini_detail, folder: Fleet, llm: false, uid: "{{ grafana_detail_dashboard_uid }}"}
+  - {template: llm_cluster_overview, folder: LLM, llm: true, uid: "{{ grafana_llm_overview_dashboard_uid }}"}
+  - {template: llm_node_detail, folder: LLM, llm: true, uid: "{{ grafana_llm_node_dashboard_uid }}"}
+  - {template: llm_performance_quality, folder: LLM, llm: true, uid: "{{ grafana_llm_performance_dashboard_uid }}"}
+  - {template: llm_slo, folder: LLM, llm: true, uid: "{{ grafana_llm_slo_dashboard_uid }}"}
+  - {template: llm_traffic_tools, folder: LLM, llm: true, uid: "{{ grafana_llm_traffic_dashboard_uid }}"}
+  - {template: llm_model_capacity, folder: LLM, llm: true, uid: "{{ grafana_llm_model_dashboard_uid }}"}
+# Provisioned before dashboards moved into folders; removed on upgrade.
+observability_server_legacy_dashboard_files:
+  - mac_minis.json
+  - mac_mini_detail.json
+  - llm_cluster_overview.json
+  - llm_node_detail.json
+  - llm_performance_quality.json
+
+# Service level objectives for proxied LLM requests (LLM SLO dashboard and the
+# burn-rate alerts). Availability: share of requests that did not end in a
+# 5xx, an unreachable server or a timeout (client 4xx and client hang-ups do
+# not count against it). Latency: share of streaming requests whose TTFT is at
+# most llm_slo_ttft_seconds, and of non-streaming requests that complete within
+# llm_slo_request_seconds. Both thresholds must be histogram bucket bounds of
+# the agent (TTFT: 0.025 0.05 0.1 0.25 0.5 1 2 5 10 30; request: 0.05 0.1 0.25
+# 0.5 1 2 5 10 20 30 60 120 300).
+llm_slo_window: 30d
+llm_slo_availability_target: 99.5
+llm_slo_latency_target: 95
+llm_slo_ttft_seconds: 2
+llm_slo_request_seconds: 30
+# Multi-window burn-rate alerting (Google SRE workbook): page when the budget
+# burns 14.4x too fast over 1h (and still over 5m), ticket at 6x over 6h (and
+# 30m). Needs at least llm_alert_min_requests requests in the long window.
+llm_slo_fast_burn_rate: 14.4
+llm_slo_slow_burn_rate: 6
+
+# Fleet (host) alert rules, provisioned on every deployment into
+# grafana_fleet_alert_folder. Thresholds in percent unless stated.
+grafana_fleet_alerts_enabled: true
+grafana_fleet_alert_folder: Fleet
+fleet_alert_host_silent_minutes: 5
+fleet_alert_cpu_percent: 90
+fleet_alert_memory_percent: 90
+fleet_alert_disk_percent: 90
+fleet_alert_latency_ms: 200
+# Failed metric points the collector could not deliver, per 15 minutes.
+fleet_alert_export_failed_points: 1
 
 # Alert thresholds (templates/llm_alerts.yml.j2). Windows are fixed in the
 # rules: 10 minutes for rates and quantiles, 15 minutes for restarts.
@@ -122,6 +185,11 @@ victoriametrics_base_arguments:
   - "-httpListenAddr=:{{ victoriametrics_port }}"
   - "-retentionPeriod={{ victoriametrics_retention }}"
   - "-opentelemetry.usePrometheusNaming"
+
+# Appended only when victoriametrics_self_scrape_interval is set.
+victoriametrics_self_scrape_arguments:
+  - "-selfScrapeInterval={{ victoriametrics_self_scrape_interval }}"
+  - "-selfScrapeJob=victoriametrics"
 
 # Appended only when victoriametrics_auth_enabled. The password is read from a
 # 0600 file rather than passed inline, so it stays out of the plist and out of

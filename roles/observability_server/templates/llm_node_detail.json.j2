@@ -2,7 +2,7 @@
     server on it. $host is single-value (set by ?var-host=<host> from the
     overview); $model filters request panels. Metric definitions:
     docs/LLM_OBSERVABILITY.md. -#}
-{% import 'llm_dashboard_macros.j2' as m %}
+{% import 'dashboard_macros.j2' as m %}
 {% set H = 'host_name="$host"' %}
 {% set HF = H ~ ', framework=~"$framework"' %}
 {% set F = 'host_name="$host", model=~"$model", framework=~"$framework"' %}
@@ -18,13 +18,15 @@ histogram_quantile({{ quantile }}, sum by (le) (rate({{ metric }}_bucket{ {{- F 
   "uid": "{{ grafana_llm_node_dashboard_uid }}",
   "title": "LLM Node Detail",
   "description": "One Mac Mini: host health plus the MLX-LM or MLX-VLM server measured by the MLX telemetry agent.",
-  "tags": ["llm", "mlx", "mlx-vlm", "otel"],
+  "tags": ["observability", "llm", "mlx", "mlx-vlm", "otel"],
   "timezone": "browser",
+  "graphTooltip": 1,
   "schemaVersion": 39,
   "version": 1,
   "refresh": "30s",
   "time": {"from": "now-3h", "to": "now"},
   "links": [
+    {"type": "dashboards", "title": "Dashboards", "tags": ["observability"], "asDropdown": true, "includeVars": false, "keepTime": true, "targetBlank": false, "icon": "external link", "url": "", "tooltip": ""},
     {"type": "link", "title": "LLM Cluster Overview", "url": "/d/{{ grafana_llm_overview_dashboard_uid }}", "icon": "dashboard", "includeVars": false, "keepTime": true, "targetBlank": false, "asDropdown": false, "tags": []},
     {"type": "link", "title": "LLM Performance, KV Cache and Quality", "url": "/d/{{ grafana_llm_performance_dashboard_uid }}", "icon": "dashboard", "includeVars": true, "keepTime": true, "targetBlank": false, "asDropdown": false, "tags": []},
     {"type": "link", "title": "Mac Mini Detail (host metrics)", "url": "/d/{{ grafana_detail_dashboard_uid }}?var-host_name=${host}", "icon": "dashboard", "includeVars": false, "keepTime": true, "targetBlank": false, "asDropdown": false, "tags": []}

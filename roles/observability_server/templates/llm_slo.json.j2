@@ -1,0 +1,103 @@
+{#- Managed by Ansible. LLM Service Levels: SLIs, error budgets and burn rates
+    for requests measured by the MLX telemetry proxy. Targets and thresholds
+    are role defaults (llm_slo_*); the burn-rate alerts in llm_alerts.yml.j2
+    use the same definitions. See docs/ALERTING.md, "Service level objectives". -#}
+{% import 'dashboard_macros.j2' as m %}
+{% set H = 'host_name=~"$host", framework=~"$framework"' %}
+{% set W = '[' ~ llm_slo_window ~ ']' %}
+{% set A = (llm_slo_availability_target | float) / 100 %}
+{% set L = (llm_slo_latency_target | float) / 100 %}
+{% set a_budget = (1 - A) | round(6) %}
+{% set l_budget = (1 - L) | round(6) %}
+{% set le_ttft = '%g' % (llm_slo_ttft_seconds | float) %}
+{% set le_req = '%g' % (llm_slo_request_seconds | float) %}
+{#- Valid = every proxied request except client errors and client hang-ups;
+    bad = 5xx, unreachable server, timeout. -#}
+{% set valid = 'mlx_requests_total{' ~ H ~ ', outcome!~"client_error|client_disconnected"}' %}
+{% set bad = 'mlx_requests_total{' ~ H ~ ', outcome=~"server_error|upstream_error|timeout"}' %}
+{%- macro bad_ratio(w, by='') -%}
+((sum{{ ' by (' ~ by ~ ')' if by else '' }} (increase({{ bad }}{{ w }})) or {{ ('0 * sum by (' ~ by ~ ') (increase(' ~ valid ~ w ~ '))') if by else 'vector(0)' }}) / sum{{ ' by (' ~ by ~ ')' if by else '' }} (increase({{ valid }}{{ w }})))
+{%- endmacro %}
+{%- macro ttft_slow(w, by='') -%}
+(1 - sum{{ ' by (' ~ by ~ ')' if by else '' }} (increase(mlx_time_to_first_token_seconds_bucket{ {{- H -}}, le="{{ le_ttft }}"}{{ w }})) / sum{{ ' by (' ~ by ~ ')' if by else '' }} (increase(mlx_time_to_first_token_seconds_count{ {{- H -}} }{{ w }})))
+{%- endmacro %}
+{%- macro req_slow(w, by='') -%}
+(1 - sum{{ ' by (' ~ by ~ ')' if by else '' }} (increase(mlx_request_duration_seconds_bucket{ {{- H -}}, stream="false", outcome="success", le="{{ le_req }}"}{{ w }})) / sum{{ ' by (' ~ by ~ ')' if by else '' }} (increase(mlx_request_duration_seconds_count{ {{- H -}}, stream="false", outcome="success"}{{ w }})))
+{%- endmacro %}
+{% set pct_spec = [["red", None], ["orange", (L * 100) - 2], ["green", L * 100]] %}
+{% set avail_spec = [["red", None], ["orange", (A * 100) - 0.5], ["green", A * 100]] %}
+{% set budget_spec = [["red", None], ["orange", 25], ["green", 50]] %}
+{% set burn_spec = [["green", None], ["orange", 1], ["red", llm_slo_slow_burn_rate | float]] %}
+{
+  {{ m.header(grafana_llm_slo_dashboard_uid, "LLM Service Levels (SLO)",
+      "Availability and latency SLIs, error budgets and burn rates for requests measured by the MLX telemetry proxy, over a rolling " ~ llm_slo_window ~ " window.",
+      ["llm", "slo", "sre"],
+      [{"title": "LLM Cluster Overview", "url": "/d/" ~ grafana_llm_overview_dashboard_uid},
+       {"title": "LLM Traffic, Tools and Outcomes", "url": "/d/" ~ grafana_llm_traffic_dashboard_uid, "vars": true}],
+      refresh="1m", time_from="now-7d") }},
+  "templating": {
+    "list": [
+      {{ m.query_var("host", "Host", "label_values(mlx_telemetry_info, host_name)", "Macs that run the MLX telemetry agent.") }},
+      {{ m.framework_var('host_name=~"$host"') }}
+    ]
+  },
+  "panels": [
+    {{ m.text(1, "", "**Objectives** (rolling " ~ llm_slo_window ~ "):  **Availability " ~ llm_slo_availability_target ~ "%** of requests end without a 5xx, an unreachable server or a timeout (client 4xx and client hang-ups are excluded).  **Latency " ~ llm_slo_latency_target ~ "%** of streaming requests reach their first token within **" ~ le_ttft ~ " s**, and of non-streaming requests complete within **" ~ le_req ~ " s**.  A burn rate of 1 spends the error budget exactly over the window; the alerts page at " ~ llm_slo_fast_burn_rate ~ "x (1 h) and ticket at " ~ llm_slo_slow_burn_rate ~ "x (6 h). Only clients that call the telemetry proxy are measured.", 0, 0, h=3) }},
+    {{ m.row(2, "Objectives over the last " ~ llm_slo_window, 3) }},
+    {{ m.stat(3, "Availability SLI", '100 * (1 - ' ~ bad_ratio(W) ~ ')', 0, 4, w=4, h=5, unit="percent", decimals=3, spec=avail_spec, color_mode="background",
+        desc="Share of valid requests that succeeded over " ~ llm_slo_window ~ ". Target " ~ llm_slo_availability_target ~ "%.", no_value="No proxied requests") }},
+    {{ m.stat(4, "Availability error budget left", '100 * (1 - ' ~ bad_ratio(W) ~ ' / ' ~ a_budget ~ ')', 4, 4, w=4, h=5, unit="percent", decimals=1, spec=budget_spec, color_mode="background",
+        desc="Share of the availability error budget (" ~ (a_budget * 100) | round(3) ~ "% of requests) still unspent over " ~ llm_slo_window ~ ". Negative = objective missed.", no_value="No proxied requests") }},
+    {{ m.stat(5, "TTFT SLI (streaming)", '100 * (1 - ' ~ ttft_slow(W) ~ ')', 8, 4, w=4, h=5, unit="percent", decimals=2, spec=pct_spec, color_mode="background",
+        desc="Share of streaming requests whose time to first token was at most " ~ le_ttft ~ " s. Target " ~ llm_slo_latency_target ~ "%.", no_value="No streaming requests") }},
+    {{ m.stat(6, "TTFT error budget left", '100 * (1 - ' ~ ttft_slow(W) ~ ' / ' ~ l_budget ~ ')', 12, 4, w=4, h=5, unit="percent", decimals=1, spec=budget_spec, color_mode="background",
+        desc="Share of the latency budget for streaming TTFT still unspent.", no_value="No streaming requests") }},
+    {{ m.stat(7, "Request latency SLI (non-streaming)", '100 * (1 - ' ~ req_slow(W) ~ ')', 16, 4, w=4, h=5, unit="percent", decimals=2, spec=pct_spec, color_mode="background",
+        desc="Share of successful non-streaming requests that completed within " ~ le_req ~ " s. Target " ~ llm_slo_latency_target ~ "%.", no_value="No non-streaming requests") }},
+    {{ m.stat(8, "Request latency budget left", '100 * (1 - ' ~ req_slow(W) ~ ' / ' ~ l_budget ~ ')', 20, 4, w=4, h=5, unit="percent", decimals=1, spec=budget_spec, color_mode="background",
+        desc="Share of the latency budget for non-streaming requests still unspent.", no_value="No non-streaming requests") }},
+    {{ m.stat(9, "Valid requests", 'sum(increase(' ~ valid ~ W ~ '))', 0, 9, w=6, h=3, decimals=0, desc="Requests counted by the availability SLI over the window.", no_value="0") }},
+    {{ m.stat(10, "Failed requests", 'sum(increase(' ~ bad ~ W ~ ')) or vector(0)', 6, 9, w=6, h=3, decimals=0, spec=[["green", None], ["red", 1]], desc="5xx, unreachable server and timeouts over the window.") }},
+    {{ m.stat(11, "Failures the budget allows", 'sum(increase(' ~ valid ~ W ~ ')) * ' ~ a_budget, 12, 9, w=6, h=3, decimals=0, desc="Valid requests x (1 - availability target): failures that can occur before the objective is missed.", no_value="0") }},
+    {{ m.stat(12, "Slow first tokens", 'sum(increase(mlx_time_to_first_token_seconds_count{' ~ H ~ '}' ~ W ~ ')) - sum(increase(mlx_time_to_first_token_seconds_bucket{' ~ H ~ ', le="' ~ le_ttft ~ '"}' ~ W ~ '))', 18, 9, w=6, h=3, decimals=0, spec=[["green", None], ["orange", 1]], desc="Streaming requests whose first token took longer than " ~ le_ttft ~ " s, over the window.", no_value="0") }},
+
+    {{ m.row(13, "Burn rate (1 = spending the budget exactly over the window)", 12) }},
+    {{ m.stat(14, "Availability burn, 1 h", bad_ratio('[1h]') ~ ' / ' ~ a_budget, 0, 13, w=4, h=4, decimals=2, spec=burn_spec, color_mode="background",
+        desc="Error ratio over the last hour divided by the error budget ratio. The fast-burn alert fires above " ~ llm_slo_fast_burn_rate ~ ".", no_value="No traffic") }},
+    {{ m.stat(15, "Availability burn, 6 h", bad_ratio('[6h]') ~ ' / ' ~ a_budget, 4, 13, w=4, h=4, decimals=2, spec=burn_spec, color_mode="background",
+        desc="The slow-burn alert fires above " ~ llm_slo_slow_burn_rate ~ ".", no_value="No traffic") }},
+    {{ m.stat(16, "TTFT burn, 1 h", ttft_slow('[1h]') ~ ' / ' ~ l_budget, 8, 13, w=4, h=4, decimals=2, spec=burn_spec, color_mode="background",
+        desc="Share of slow first tokens in the last hour divided by the latency budget.", no_value="No streaming traffic") }},
+    {{ m.stat(17, "TTFT burn, 6 h", ttft_slow('[6h]') ~ ' / ' ~ l_budget, 12, 13, w=4, h=4, decimals=2, spec=burn_spec, color_mode="background", no_value="No streaming traffic") }},
+    {{ m.stat(18, "Request latency burn, 1 h", req_slow('[1h]') ~ ' / ' ~ l_budget, 16, 13, w=4, h=4, decimals=2, spec=burn_spec, color_mode="background", no_value="No non-streaming traffic") }},
+    {{ m.stat(19, "Request latency burn, 6 h", req_slow('[6h]') ~ ' / ' ~ l_budget, 20, 13, w=4, h=4, decimals=2, spec=burn_spec, color_mode="background", no_value="No non-streaming traffic") }},
+    {{ m.ts(20, "Availability burn rate", [{"expr": bad_ratio('[5m]') ~ ' / ' ~ a_budget, "legend": "5m"}, {"expr": bad_ratio('[1h]') ~ ' / ' ~ a_budget, "legend": "1h"}, {"expr": bad_ratio('[6h]') ~ ' / ' ~ a_budget, "legend": "6h"}], 0, 17, w=12, h=8, min=0,
+        desc="Multi-window burn rate. Short windows react fast, long windows filter noise; the alerts require both to exceed the threshold.", no_value="No proxied requests",
+        overrides=[{"matcher": {"id": "byName", "options": "1h"}, "properties": [{"id": "custom.lineWidth", "value": 2}]}]) }},
+    {{ m.ts(21, "Latency burn rate", [{"expr": ttft_slow('[1h]') ~ ' / ' ~ l_budget, "legend": "TTFT 1h"}, {"expr": ttft_slow('[6h]') ~ ' / ' ~ l_budget, "legend": "TTFT 6h"}, {"expr": req_slow('[1h]') ~ ' / ' ~ l_budget, "legend": "request 1h"}, {"expr": req_slow('[6h]') ~ ' / ' ~ l_budget, "legend": "request 6h"}], 12, 17, w=12, h=8, min=0,
+        desc="Burn rate of the latency objectives: share of slow requests divided by the latency budget.", no_value="No proxied requests") }},
+
+    {{ m.row(22, "Trends", 25) }},
+    {{ m.ts(23, "Error ratio vs budget", [{"expr": '100 * ' ~ bad_ratio('[$__rate_interval]'), "legend": "error ratio"}, {"expr": 'vector(' ~ (a_budget * 100) ~ ')', "legend": "budget (" ~ (a_budget * 100) | round(3) ~ "%)"}], 0, 26, w=8, h=8, unit="percent", min=0,
+        desc="Share of valid requests that failed, against the error budget ratio.", no_value="No proxied requests",
+        overrides=[{"matcher": {"id": "byRegexp", "options": "budget.*"}, "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}, {"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]}]) }},
+    {{ m.ts(24, "TTFT p95 vs objective", [{"expr": 'histogram_quantile(0.95, sum by (le) (rate(mlx_time_to_first_token_seconds_bucket{' ~ H ~ '}[$__rate_interval])))', "legend": "p95"}, {"expr": 'histogram_quantile(0.5, sum by (le) (rate(mlx_time_to_first_token_seconds_bucket{' ~ H ~ '}[$__rate_interval])))', "legend": "p50"}, {"expr": 'vector(' ~ le_ttft ~ ')', "legend": "objective"}], 8, 26, w=8, h=8, unit="s", min=0,
+        desc="Streaming time to first token against the latency objective's threshold.", no_value="No streaming requests",
+        overrides=[{"matcher": {"id": "byName", "options": "objective"}, "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}, {"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]}]) }},
+    {{ m.ts(25, "Non-streaming latency p95 vs objective", [{"expr": 'histogram_quantile(0.95, sum by (le) (rate(mlx_request_duration_seconds_bucket{' ~ H ~ ', stream="false", outcome="success"}[$__rate_interval])))', "legend": "p95"}, {"expr": 'vector(' ~ le_req ~ ')', "legend": "objective"}], 16, 26, w=8, h=8, unit="s", min=0,
+        desc="End-to-end duration of successful non-streaming requests against the objective's threshold.", no_value="No non-streaming requests",
+        overrides=[{"matcher": {"id": "byName", "options": "objective"}, "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}, {"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]}]) }},
+
+    {{ m.row(26, "Per node (rolling " ~ llm_slo_window ~ ")", 34) }},
+    {{ m.table(27, "Service levels per node", [
+        {"expr": '100 * (1 - ' ~ bad_ratio(W, 'host_name, framework') ~ ')', "legend": "availability"},
+        {"expr": '100 * (1 - ' ~ ttft_slow(W, 'host_name, framework') ~ ')', "legend": "ttft"},
+        {"expr": '100 * (1 - ' ~ req_slow(W, 'host_name, framework') ~ ')', "legend": "request"},
+        {"expr": 'sum by (host_name, framework) (increase(' ~ valid ~ W ~ '))', "legend": "requests"}], 0, 35, h=8,
+        desc="Each node's SLIs over the window. A node with no traffic of a kind shows an empty cell for that SLI.", no_value="No proxied requests",
+        organize={"excludeByName": {"Time": true}, "renameByName": {"host_name": "Node", "framework": "Framework", "Value #A": "Availability %", "Value #B": "TTFT within " ~ le_ttft ~ " s %", "Value #C": "Non-streaming within " ~ le_req ~ " s %", "Value #D": "Valid requests"}},
+        overrides=[{"matcher": {"id": "byRegexp", "options": ".*%"}, "properties": [{"id": "unit", "value": "percent"}, {"id": "decimals", "value": 2}, {"id": "custom.cellOptions", "value": {"type": "color-text"}}, {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "red", "value": None}, {"color": "orange", "value": (L * 100) - 2}, {"color": "green", "value": L * 100}]}}]},
+                   {"matcher": {"id": "byName", "options": "Valid requests"}, "properties": [{"id": "decimals", "value": 0}]},
+                   {"matcher": {"id": "byName", "options": "Node"}, "properties": [{"id": "links", "value": [{"title": "Open ${__value.raw} in LLM Node Detail", "url": "/d/" ~ grafana_llm_node_dashboard_uid ~ "?var-host=${__value.raw:percentencode}&${__url_time_range}"}]}]}]) }}
+  ]
+}

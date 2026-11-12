@@ -2,7 +2,7 @@
     agent (roles/observability_llm). Host and model variables filter every
     panel; per-node rows link to LLM Node Detail. Metric definitions:
     docs/LLM_OBSERVABILITY.md. -#}
-{% import 'llm_dashboard_macros.j2' as m %}
+{% import 'dashboard_macros.j2' as m %}
 {% set H = 'host_name=~"$host"' %}
 {% set HF = H ~ ', framework=~"$framework"' %}
 {% set F = 'host_name=~"$host", model=~"$model", framework=~"$framework"' %}
@@ -18,13 +18,15 @@ histogram_quantile({{ quantile }}, sum by (le{{ ', ' ~ by if by else '' }}) (rat
   "uid": "{{ grafana_llm_overview_dashboard_uid }}",
   "title": "LLM Cluster Overview",
   "description": "Fleet view of MLX-LM and MLX-VLM servers measured by the MLX telemetry agent. Request panels only cover clients that send requests through the telemetry proxy.",
-  "tags": ["llm", "mlx", "mlx-vlm", "otel"],
+  "tags": ["observability", "llm", "mlx", "mlx-vlm", "otel"],
   "timezone": "browser",
+  "graphTooltip": 1,
   "schemaVersion": 39,
   "version": 1,
   "refresh": "30s",
   "time": {"from": "now-6h", "to": "now"},
   "links": [
+    {"type": "dashboards", "title": "Dashboards", "tags": ["observability"], "asDropdown": true, "includeVars": false, "keepTime": true, "targetBlank": false, "icon": "external link", "url": "", "tooltip": ""},
     {"type": "link", "title": "LLM Node Detail", "url": "/d/{{ grafana_llm_node_dashboard_uid }}", "icon": "dashboard", "includeVars": false, "keepTime": true, "targetBlank": false, "asDropdown": false, "tags": []},
     {"type": "link", "title": "LLM Performance, KV Cache and Quality", "url": "/d/{{ grafana_llm_performance_dashboard_uid }}", "icon": "dashboard", "includeVars": true, "keepTime": true, "targetBlank": false, "asDropdown": false, "tags": []},
     {"type": "link", "title": "Mac Mini Fleet Overview", "url": "/d/{{ grafana_fleet_dashboard_uid }}", "icon": "dashboard", "includeVars": false, "keepTime": true, "targetBlank": false, "asDropdown": false, "tags": []}

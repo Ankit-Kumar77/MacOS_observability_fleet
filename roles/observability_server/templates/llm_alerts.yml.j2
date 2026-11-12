@@ -79,6 +79,33 @@
    "summary": "{{ $values.A }} failed telemetry exports in 15 minutes on " ~ on_fw,
    "description": "The telemetry agent could not deliver OTLP to the local collector (collector down or restarting). Failures are reported once an export succeeds again; a node that cannot export at all shows up as stale telemetry instead."}
 ] -%}
+{#- SLO burn-rate rules (Google SRE workbook, multi-window): the error ratio
+    over a long and a short window must both exceed burn x budget. Same SLI
+    definitions as the LLM Service Levels dashboard (llm_slo.json.j2). -#}
+{%- set a_budget = ((100 - (llm_slo_availability_target | float)) / 100) | round(6) -%}
+{%- set l_budget = ((100 - (llm_slo_latency_target | float)) / 100) | round(6) -%}
+{%- set le_ttft = '%g' % (llm_slo_ttft_seconds | float) -%}
+{%- macro avail_ratio(w) -%}
+(sum by (host_name, framework) (increase(mlx_requests_total{outcome=~"server_error|upstream_error|timeout"}[{{ w }}])) / sum by (host_name, framework) (increase(mlx_requests_total{outcome!~"client_error|client_disconnected"}[{{ w }}])))
+{%- endmacro -%}
+{%- macro ttft_ratio(w) -%}
+(1 - sum by (host_name, framework) (increase(mlx_time_to_first_token_seconds_bucket{le="{{ le_ttft }}"}[{{ w }}])) / sum by (host_name, framework) (increase(mlx_time_to_first_token_seconds_count[{{ w }}])))
+{%- endmacro -%}
+{%- macro volume(w, metric='mlx_requests_total') -%}
+(sum by (host_name, framework) (increase({{ metric }}[{{ w }}])) >= {{ llm_alert_min_requests }})
+{%- endmacro -%}
+{%- set burn = [] -%}
+{%- for name, label, ratio, budget, vol in [("availability", "availability", avail_ratio, a_budget, "mlx_requests_total"), ("ttft", "time-to-first-token", ttft_ratio, l_budget, "mlx_time_to_first_token_seconds_count")] -%}
+{%- for speed, long, short, rate, severity, for_ in [("fast", "1h", "5m", llm_slo_fast_burn_rate, "critical", "2m"), ("slow", "6h", "30m", llm_slo_slow_burn_rate, "warning", "15m")] -%}
+{%- set _ = burn.append({
+  "uid": "llm-slo-" ~ name ~ "-" ~ speed ~ "-burn", "title": "LLM " ~ label ~ " SLO burning " ~ speed,
+  "expr": ratio(long) ~ " / " ~ budget ~ " and on (host_name, framework) (" ~ ratio(short) ~ " / " ~ budget ~ " > " ~ rate ~ ") and on (host_name, framework) " ~ volume(long, vol),
+  "op": "gt", "threshold": rate, "for": for_, "severity": severity, "window": 21600 if long == "6h" else 3600,
+  "summary": "The " ~ label ~ " error budget on " ~ on_fw ~ " is burning {{ humanize $values.A }}x too fast",
+  "description": "Over the last " ~ long ~ " (and still over " ~ short ~ "), the " ~ label ~ " SLO's error ratio is more than " ~ rate ~ " times its budget. At this rate the " ~ llm_slo_window ~ " budget is gone in " ~ ((30 * 24) / (rate | float)) | round(1) ~ " hours (for a 30d window). See the LLM Service Levels dashboard."}) -%}
+{%- endfor -%}
+{%- endfor -%}
+{%- set specs = specs + burn -%}
 {%- set rules = [] -%}
 {%- for s in specs -%}
 {%- set _ = rules.append({
@@ -92,7 +119,7 @@
   ],
   "noDataState": "OK", "execErrState": "Error", "for": s["for"], "isPaused": false,
   "labels": {"severity": s.severity, "component": "mlx"},
-  "annotations": {"summary": s.summary, "description": s.description, "dashboard": "/d/" ~ grafana_llm_overview_dashboard_uid}
+  "annotations": {"summary": s.summary, "description": s.description, "runbook_url": "docs/ALERTING.md#" ~ s.uid, "dashboard": "/d/" ~ (grafana_llm_slo_dashboard_uid if s.uid.startswith("llm-slo-") else grafana_llm_overview_dashboard_uid)}
 }) -%}
 {%- endfor -%}
 {%- if grafana_llm_alerts_enabled | bool -%}

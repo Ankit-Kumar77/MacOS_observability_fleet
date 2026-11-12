@@ -1,0 +1,86 @@
+{#- Managed by Ansible. Grafana file-provisioned alert rules for every Mac in the
+    fleet (host metrics, latency, SSH, collector delivery) and for the
+    monitoring Mac's VictoriaMetrics. Thresholds are role defaults
+    (fleet_alert_*). Runbooks: docs/ALERTING.md.
+
+    Rendered as JSON (valid YAML) from a data structure and checked with
+    json.load before install: Grafana refuses to start when an alerting
+    provisioning file does not parse. noDataState OK everywhere: a disabled
+    signal (latency check, SSH state, self-monitoring) never fires; a Mac that
+    stops reporting has its own rule.
+
+    With grafana_fleet_alerts_enabled false the file lists the rule uids under
+    deleteRules, because removing a provisioning file does not delete rules. -#}
+{%- set cpu_busy = '100 * (1 - sum by (host_name) (rate(system_cpu_time_seconds_total{state="idle"}[5m])) / sum by (host_name) (rate(system_cpu_time_seconds_total[5m])))' -%}
+{%- set mem_pct = 'sum by (host_name) (system_memory_usage_bytes{state="used"}) / sum by (host_name) (system_memory_usage_bytes) * 100' -%}
+{%- set disk_pct = 'sum by (host_name) (system_filesystem_usage_bytes{state="used", mountpoint="/"}) / sum by (host_name) (system_filesystem_usage_bytes{mountpoint="/"}) * 100' -%}
+{%- set specs = [
+  {"uid": "fleet-host-silent", "title": "Mac stopped reporting",
+   "expr": "max by (host_name) (max_over_time(system_memory_usage_bytes[1h])) unless on (host_name) max by (host_name) (system_memory_usage_bytes)",
+   "op": "gt", "threshold": 0, "for": fleet_alert_host_silent_minutes ~ "m", "severity": "critical", "window": 3600, "dashboard": grafana_stack_dashboard_uid,
+   "summary": "No host metrics from {{ $labels.host_name }}",
+   "description": "The Mac reported host metrics in the last hour but not in the last 5 minutes. Usual causes: the collector LaunchAgent stopped, the Mac slept or rebooted (LaunchAgents do not start at boot: re-run the agent play for it), or macOS Local Network Privacy blocks the collector (see docs/LAUNCHAGENT_VARIANT.md)."},
+  {"uid": "fleet-cpu-high", "title": "CPU busy on a Mac",
+   "expr": cpu_busy, "op": "gt", "threshold": fleet_alert_cpu_percent, "for": "15m", "severity": "warning", "window": 600, "dashboard": grafana_detail_dashboard_uid,
+   "summary": "CPU {{ humanize $values.A }}% busy on {{ $labels.host_name }}",
+   "description": "CPU busy above " ~ fleet_alert_cpu_percent ~ "% for 15 minutes (all cores, 5-minute rate). Check the top processes on that Mac."},
+  {"uid": "fleet-memory-high", "title": "Memory nearly full on a Mac",
+   "expr": mem_pct, "op": "gt", "threshold": fleet_alert_memory_percent, "for": "15m", "severity": "warning", "window": 300, "dashboard": grafana_detail_dashboard_uid,
+   "summary": "Memory {{ humanize $values.A }}% used on {{ $labels.host_name }}",
+   "description": "Used memory (inactive, reclaimable memory not counted) above " ~ fleet_alert_memory_percent ~ "% for 15 minutes. On LLM nodes compare with the model's footprint on the LLM Model, Capacity and Confidence dashboard."},
+  {"uid": "fleet-disk-high", "title": "Root volume filling up",
+   "expr": disk_pct, "op": "gt", "threshold": fleet_alert_disk_percent, "for": "30m", "severity": "warning", "window": 300, "dashboard": grafana_detail_dashboard_uid,
+   "summary": "Root volume {{ humanize $values.A }}% used on {{ $labels.host_name }}",
+   "description": "The APFS container holding / is above " ~ fleet_alert_disk_percent ~ "% used. Old releases under ~/tools/observability (collector ~334 MB, Grafana ~1.3 GB per version) and Hugging Face model caches are common culprits."},
+  {"uid": "fleet-disk-critical", "title": "Root volume almost full",
+   "expr": disk_pct, "op": "gt", "threshold": 97, "for": "5m", "severity": "critical", "window": 300, "dashboard": grafana_detail_dashboard_uid,
+   "summary": "Root volume {{ humanize $values.A }}% used on {{ $labels.host_name }}",
+   "description": "Less than 3% of the APFS container is free. macOS and the services on it may start failing writes."},
+  {"uid": "fleet-latency-high", "title": "Network latency to the monitoring Mac high",
+   "expr": "max by (host_name) (tcpcheck_duration_milliseconds)", "op": "gt", "threshold": fleet_alert_latency_ms, "for": "10m", "severity": "warning", "window": 300, "dashboard": grafana_fleet_dashboard_uid,
+   "summary": "TCP connect {{ $values.A }} ms from {{ $labels.host_name }} to the monitoring Mac",
+   "description": "TCP connect time to VictoriaMetrics above " ~ fleet_alert_latency_ms ~ " ms for 10 minutes (tcp_check receiver)."},
+  {"uid": "fleet-latency-check-failing", "title": "Monitoring Mac unreachable from a Mac",
+   "expr": "min by (host_name) (tcpcheck_status_ratio)", "op": "lt", "threshold": 1, "for": "5m", "severity": "warning", "window": 300, "dashboard": grafana_fleet_dashboard_uid,
+   "summary": "{{ $labels.host_name }} cannot open a TCP connection to the monitoring Mac",
+   "description": "The tcp_check receiver fails while other metrics still arrive: intermittent network trouble, or a port or firewall change on the monitoring Mac."},
+  {"uid": "fleet-ssh-down", "title": "SSH not answering on a Mac",
+   "expr": "(1 - max by (host_name) (ssh_service_up)) and on (host_name) (max by (host_name) (ssh_remote_login_enabled) == 1)", "op": "gt", "threshold": 0, "for": "5m", "severity": "critical", "window": 300, "dashboard": grafana_detail_dashboard_uid,
+   "summary": "Remote Login is on but sshd does not answer on {{ $labels.host_name }}",
+   "description": "launchd holds port 22 but sshd sent no SSH-2.0 banner on loopback for 5 minutes, so remote administration (and Ansible) will fail. Check the Mac's console or Remote Login setting."},
+  {"uid": "fleet-collector-export-failing", "title": "Collector dropping metrics",
+   "expr": "sum by (host_name) (increase(otelcol_exporter_send_failed_metric_points_total[15m]))", "op": "gt", "threshold": (fleet_alert_export_failed_points | int) - 1, "for": "0s", "severity": "warning", "window": 900, "dashboard": grafana_stack_dashboard_uid,
+   "summary": "{{ humanize $values.A }} metric points dropped in 15 minutes by the collector on {{ $labels.host_name }}",
+   "description": "The OpenTelemetry Collector could not deliver points to VictoriaMetrics after retries. See its error log on that Mac (~/tools/observability/var/log/otelcol.err.log)."},
+  {"uid": "fleet-collector-queue-filling", "title": "Collector export queue filling",
+   "expr": "100 * max by (host_name) (otelcol_exporter_queue_size) / max by (host_name) (otelcol_exporter_queue_capacity)", "op": "gt", "threshold": 80, "for": "10m", "severity": "warning", "window": 300, "dashboard": grafana_stack_dashboard_uid,
+   "summary": "Export queue {{ humanize $values.A }}% full on {{ $labels.host_name }}",
+   "description": "The collector is producing faster than it can deliver: VictoriaMetrics is slow or intermittently unreachable. At 100% new data is dropped."},
+  {"uid": "fleet-vm-disk-low", "title": "VictoriaMetrics disk space low",
+   "expr": "min(vm_free_disk_space_bytes{job=\"victoriametrics\"}) / 1073741824", "op": "lt", "threshold": 5, "for": "15m", "severity": "critical", "window": 300, "dashboard": grafana_stack_dashboard_uid,
+   "summary": "Only {{ humanize $values.A }} GiB free for VictoriaMetrics",
+   "description": "VictoriaMetrics switches to read-only when free space falls below its -storage.minFreeDiskSpaceBytes limit, and every Mac's metrics are then rejected. Free space or shorten victoriametrics_retention."}
+] -%}
+{%- set rules = [] -%}
+{%- for s in specs -%}
+{%- set _ = rules.append({
+  "uid": s.uid, "title": s.title, "condition": "B",
+  "data": [
+    {"refId": "A", "relativeTimeRange": {"from": s.window | int, "to": 0}, "datasourceUid": "victoriametrics",
+     "model": {"refId": "A", "expr": s.expr, "instant": true, "intervalMs": 60000, "maxDataPoints": 43200}},
+    {"refId": "B", "relativeTimeRange": {"from": 0, "to": 0}, "datasourceUid": "__expr__",
+     "model": {"refId": "B", "type": "threshold", "expression": "A",
+               "conditions": [{"evaluator": {"type": s.op, "params": [s.threshold | float]}}]}}
+  ],
+  "noDataState": "OK", "execErrState": "Error", "for": s["for"], "isPaused": false,
+  "labels": {"severity": s.severity, "component": "fleet"},
+  "annotations": {"summary": s.summary, "description": s.description, "runbook_url": "docs/ALERTING.md#" ~ s.uid, "dashboard": "/d/" ~ s.dashboard}
+}) -%}
+{%- endfor -%}
+{%- if grafana_fleet_alerts_enabled | bool -%}
+{{ {"apiVersion": 1, "groups": [{"orgId": 1, "name": "Fleet", "folder": grafana_fleet_alert_folder, "interval": "1m", "rules": rules}]} | to_nice_json(sort_keys=false) }}
+{%- else -%}
+{%- set deletes = [] -%}
+{%- for s in specs -%}{%- set _ = deletes.append({"orgId": 1, "uid": s.uid}) -%}{%- endfor -%}
+{{ {"apiVersion": 1, "deleteRules": deletes} | to_nice_json(sort_keys=false) }}
+{%- endif %}

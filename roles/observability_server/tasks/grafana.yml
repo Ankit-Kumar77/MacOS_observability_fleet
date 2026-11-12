@@ -50,39 +50,58 @@
     mode: '0644'
   notify: Restart Grafana
 
-- name: Provision default Mac Minis dashboard
-  ansible.builtin.template:
-    src: dashboard.json.j2
-    dest: "{{ etc_dir }}/grafana/provisioning/dashboards/mac_minis.json"
-    mode: '0644'
+# Dashboards live in one sub-directory per Grafana folder (Fleet, LLM,
+# Platform); the provider maps directories to folders. uids are fixed in the
+# templates, so links keep working when a dashboard changes folder.
+- name: Create the dashboard folders
+  ansible.builtin.file:
+    path: "{{ etc_dir }}/grafana/provisioning/dashboards/{{ item }}"
+    state: directory
+    mode: '0755'
+  loop: "{{ (observability_server_dashboards | rejectattr('llm') | list
+             + (observability_server_dashboards | selectattr('llm') | list if grafana_llm_dashboards_enabled | bool else []))
+            | map(attribute='folder') | unique | list }}"
+
+# Before folders, every dashboard was one file at the top level. Removed
+# first, so Grafana never sees the same uid in two files.
+- name: Remove dashboards provisioned before the folder layout
+  ansible.builtin.file:
+    path: "{{ etc_dir }}/grafana/provisioning/dashboards/{{ item }}"
+    state: absent
+  loop: "{{ observability_server_legacy_dashboard_files }}"
   notify: Restart Grafana
 
-# One reusable per-host dashboard; the fleet dashboard links to it by uid.
-- name: Provision Mac Mini detail dashboard
+- name: Provision dashboards
   ansible.builtin.template:
-    src: dashboard_detail.json.j2
-    dest: "{{ etc_dir }}/grafana/provisioning/dashboards/mac_mini_detail.json"
-    mode: '0644'
-  notify: Restart Grafana
-
-# LLM dashboards: separate files and uids, so the two host dashboards above are
-# never touched. Removed (and so deleted by the provider) when disabled.
-- name: Provision LLM dashboards
-  ansible.builtin.template:
-    src: "{{ item }}.json.j2"
-    dest: "{{ etc_dir }}/grafana/provisioning/dashboards/{{ item }}.json"
+    src: "{{ item.template }}.json.j2"
+    dest: "{{ etc_dir }}/grafana/provisioning/dashboards/{{ item.folder }}/{{ item.file | default(item.template) }}.json"
     mode: '0644'
     validate: "{{ ansible_facts['python']['executable'] }} -c 'import json, sys; json.load(open(sys.argv[1]))' %s"
-  loop: "{{ observability_server_llm_dashboards }}"
-  when: grafana_llm_dashboards_enabled | bool
+  loop: "{{ observability_server_dashboards | rejectattr('llm') | list
+            + (observability_server_dashboards | selectattr('llm') | list if grafana_llm_dashboards_enabled | bool else []) }}"
+  loop_control:
+    label: "{{ item.folder }}/{{ item.file | default(item.template) }}"
   notify: Restart Grafana
 
+# LLM dashboards are removed (and so deleted by the provider) when disabled.
 - name: Remove LLM dashboards when LLM observability is off
   ansible.builtin.file:
-    path: "{{ etc_dir }}/grafana/provisioning/dashboards/{{ item }}.json"
+    path: "{{ etc_dir }}/grafana/provisioning/dashboards/{{ item.folder }}/{{ item.file | default(item.template) }}.json"
     state: absent
-  loop: "{{ observability_server_llm_dashboards }}"
+  loop: "{{ observability_server_dashboards | selectattr('llm') | list }}"
+  loop_control:
+    label: "{{ item.folder }}/{{ item.file | default(item.template) }}"
   when: not (grafana_llm_dashboards_enabled | bool)
+  notify: Restart Grafana
+
+# Host-level rules for every Mac; always rendered (as deleteRules when
+# grafana_fleet_alerts_enabled is false).
+- name: Provision fleet alert rules
+  ansible.builtin.template:
+    src: fleet_alerts.yml.j2
+    dest: "{{ etc_dir }}/grafana/provisioning/alerting/fleet_alerts.yml"
+    mode: '0644'
+    validate: "{{ ansible_facts['python']['executable'] }} -c 'import json, sys; d = json.load(open(sys.argv[1])); assert d[\"apiVersion\"] == 1 and (d.get(\"groups\") or d.get(\"deleteRules\"))' %s"
   notify: Restart Grafana
 
 - name: Check for previously provisioned LLM alert rules

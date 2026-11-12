@@ -72,9 +72,9 @@
   no_log: true
   tags: ['verify']
 
-- name: Verify the fleet and detail dashboards were provisioned
+- name: Verify every dashboard was provisioned
   ansible.builtin.uri:
-    url: "http://localhost:{{ grafana_port }}/api/dashboards/uid/{{ item }}"
+    url: "http://localhost:{{ grafana_port }}/api/dashboards/uid/{{ item.uid }}"
     url_username: admin
     url_password: "{{ grafana_admin_password }}"
     force_basic_auth: true
@@ -84,10 +84,34 @@
   until: observability_server_dashboard.status is defined and observability_server_dashboard.status == 200
   retries: "{{ grafana_ready_retries }}"
   delay: "{{ service_ready_delay }}"
-  loop:
-    - "{{ grafana_fleet_dashboard_uid }}"
-    - "{{ grafana_detail_dashboard_uid }}"
+  loop: "{{ observability_server_dashboards | rejectattr('llm') | list
+            + (observability_server_dashboards | selectattr('llm') | list if grafana_llm_dashboards_enabled | bool else []) }}"
+  loop_control:
+    label: "{{ item.folder }}/{{ item.uid }}"
   no_log: true
+  tags: ['verify']
+
+- name: Read the provisioned alert rules
+  ansible.builtin.uri:
+    url: "http://localhost:{{ grafana_port }}/api/v1/provisioning/alert-rules"
+    url_username: admin
+    url_password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    method: GET
+    status_code: 200
+  register: observability_server_alert_rules
+  no_log: true
+  tags: ['verify']
+
+- name: Assert the fleet alert rules are loaded
+  ansible.builtin.assert:
+    that:
+      - (observability_server_alert_rules.json | selectattr('uid', 'match', '^fleet-') | list | length) > 0
+    fail_msg: >-
+      Grafana has no fleet-* alert rules. Check fleet_alerts.yml under
+      {{ etc_dir }}/grafana/provisioning/alerting and Grafana's log.
+    quiet: true
+  when: grafana_fleet_alerts_enabled | bool
   tags: ['verify']
 
 - name: Report server verification success
@@ -95,6 +119,6 @@
     msg: >-
       VictoriaMetrics (port {{ victoriametrics_port }}) and Grafana (port
       {{ grafana_port }}) are running as LaunchAgents in {{ launchd_domain }},
-      the VictoriaMetrics datasource is registered, and the Mac Mini fleet and
-      detail dashboards are provisioned.
+      the VictoriaMetrics datasource is registered, every dashboard is
+      provisioned and the alert rules are loaded.
   tags: ['verify']

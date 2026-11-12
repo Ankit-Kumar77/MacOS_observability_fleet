@@ -1,0 +1,39 @@
+{#- Managed by Ansible. Observability Home: Grafana's home dashboard
+    (grafana.ini default_home_dashboard_path). Fleet-wide status at a glance,
+    firing alerts, and a directory of every provisioned dashboard. -#}
+{% import 'dashboard_macros.j2' as m %}
+{% set host_mem = 'system_memory_usage_bytes' %}
+{% set cpu_busy = '100 * (1 - sum by (host_name) (rate(system_cpu_time_seconds_total{state="idle"}[5m])) / sum by (host_name) (rate(system_cpu_time_seconds_total[5m])))' %}
+{% set mem_pct = 'sum by (host_name) (system_memory_usage_bytes{state="used"}) / sum by (host_name) (system_memory_usage_bytes) * 100' %}
+{% set disk_pct = 'sum by (host_name) (system_filesystem_usage_bytes{state="used", mountpoint="/"}) / sum by (host_name) (system_filesystem_usage_bytes{mountpoint="/"}) * 100' %}
+{
+  {{ m.header(grafana_home_dashboard_uid, "Observability Home",
+      "Start here: fleet status at a glance, alerts firing now, and every dashboard of the Mac Mini observability stack.",
+      ["home", "platform"],
+      [{"title": "Mac Mini Fleet Overview", "url": "/d/" ~ grafana_fleet_dashboard_uid}] + ([{"title": "LLM Cluster Overview", "url": "/d/" ~ grafana_llm_overview_dashboard_uid}] if grafana_llm_dashboards_enabled | bool else []),
+      refresh="1m", time_from="now-1h") }},
+  "templating": {"list": []},
+  "panels": [
+    {{ m.text(1, "", "## Mac Mini fleet observability\nHost metrics, SSH access and network latency from every Mac (OpenTelemetry Collector), stored in VictoriaMetrics" ~ (", plus MLX-LM / MLX-VLM inference telemetry" if grafana_llm_dashboards_enabled | bool else "") ~ ". Everything runs as per-user LaunchAgents, without sudo. Click a number to drill down; the **Dashboards** menu at the top right of every dashboard links them all.", 0, 0, w=24, h=3) }},
+    {{ m.row(2, "Fleet status", 3) }},
+    {{ m.stat(3, "Macs reporting", 'count(count by (host_name) (' ~ host_mem ~ '))', 0, 4, w=4, decimals=0, spec=[["red", None], ["green", 1]], desc="Macs whose collector delivered host metrics in the last 5 minutes.", no_value="No hosts reporting") }},
+    {{ m.stat(4, "Macs silent (last hour)", 'count(max by (host_name) (max_over_time(' ~ host_mem ~ '[1h])) unless on (host_name) max by (host_name) (' ~ host_mem ~ ')) or vector(0)', 4, 4, w=4, decimals=0, spec=[["green", None], ["red", 1]], color_mode="background",
+        desc="Macs that reported in the last hour but not in the last 5 minutes: collector stopped, Mac asleep or rebooted (LaunchAgents do not start at boot), or blocked by Local Network Privacy.") }},
+    {{ m.stat(5, "Busiest CPU", 'max(' ~ cpu_busy ~ ')', 8, 4, w=4, unit="percent", decimals=0, spec=[["green", None], ["orange", 75], ["red", fleet_alert_cpu_percent]], desc="Highest CPU busy % across the fleet (5-minute rate).") }},
+    {{ m.stat(6, "Highest memory use", 'max(' ~ mem_pct ~ ')', 12, 4, w=4, unit="percent", decimals=0, spec=[["green", None], ["orange", 80], ["red", fleet_alert_memory_percent]], desc="Highest memory used % (inactive, reclaimable memory not counted).") }},
+    {{ m.stat(7, "Fullest disk", 'max(' ~ disk_pct ~ ')', 16, 4, w=4, unit="percent", decimals=0, spec=[["green", None], ["orange", 80], ["red", fleet_alert_disk_percent]], desc="Highest used % of the root volume across the fleet.") }},
+    {{ m.stat(8, "Worst latency to monitoring Mac", 'max(tcpcheck_duration_milliseconds)', 20, 4, w=4, unit="ms", decimals=0, spec=[["green", None], ["orange", fleet_alert_latency_ms / 2], ["red", fleet_alert_latency_ms]], desc="Highest TCP connect time from a Mac to VictoriaMetrics.", no_value="Latency check off") }},
+{% if grafana_llm_dashboards_enabled | bool %}
+    {{ m.row(9, "LLM serving", 8) }},
+    {{ m.stat(10, "LLM servers up", 'sum(max by (host_name) (mlx_server_up))', 0, 9, w=4, decimals=0, spec=[["red", None], ["green", 1]], desc="Nodes whose MLX-LM / MLX-VLM server answered /health.", no_value="No LLM telemetry") }},
+    {{ m.stat(11, "Requests / min", 'sum(rate(mlx_requests_total[5m])) * 60', 4, 9, w=4, decimals=1, desc="Proxied inference requests per minute, fleet-wide.", no_value="0") }},
+    {{ m.stat(12, "Error rate", '100 * (sum(rate(mlx_requests_total{outcome=~"server_error|upstream_error|timeout"}[15m])) or vector(0)) / sum(rate(mlx_requests_total[15m]))', 8, 9, w=4, unit="percent", decimals=2, spec=[["green", None], ["orange", 1], ["red", llm_alert_error_rate_percent]], desc="Share of requests failing server-side over 15 minutes.", no_value="No traffic") }},
+    {{ m.stat(13, "TTFT p95", 'histogram_quantile(0.95, sum by (le) (rate(mlx_time_to_first_token_seconds_bucket[15m])))', 12, 9, w=4, unit="s", decimals=2, spec=[["green", None], ["orange", llm_slo_ttft_seconds], ["red", llm_alert_ttft_p95_seconds]], desc="Streaming time to first token, 95th percentile over 15 minutes.", no_value="No streaming traffic") }},
+    {{ m.stat(14, "Availability (SLO window)", '100 * (1 - (sum(increase(mlx_requests_total{outcome=~"server_error|upstream_error|timeout"}[' ~ llm_slo_window ~ '])) or vector(0)) / sum(increase(mlx_requests_total{outcome!~"client_error|client_disconnected"}[' ~ llm_slo_window ~ '])))', 16, 9, w=4, unit="percent", decimals=2, spec=[["red", None], ["green", llm_slo_availability_target]], desc="Availability SLI over " ~ llm_slo_window ~ " (target " ~ llm_slo_availability_target ~ "%). Details on LLM Service Levels.", no_value="No traffic") }},
+    {{ m.stat(15, "Tokens / min", 'sum(rate(mlx_tokens_completion_total[5m])) * 60', 20, 9, w=4, decimals=0, desc="Completion tokens generated per minute, fleet-wide.", no_value="0") }},
+{% endif %}
+    {{ m.row(16, "Alerts and dashboards", 13) }},
+    {{ m.alertlist(17, "Firing and pending alerts", 0, 14, w=12, h=12, desc="Grafana-managed alert rules currently firing or pending, all folders. Rules and runbooks: docs/ALERTING.md.") }},
+    {{ m.dashlist(18, "All dashboards", 12, 14, w=12, h=12, desc="Every dashboard provisioned by this project, grouped by folder.") }}
+  ]
+}

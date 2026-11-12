@@ -1,0 +1,50 @@
+---
+# Renders every Grafana dashboard and alert-rule template of the server role
+# without touching any host, then checks them with tests/check_dashboards.py.
+#   ansible-playbook tests/render_templates.yml -e render_dir=/tmp/render
+# CI runs this; see .github/workflows/lint.yml.
+- name: Render Grafana provisioning templates
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    render_dir: "{{ playbook_dir }}/.rendered"
+    # Render the LLM variants too (override with -e render_llm=false).
+    render_llm: true
+  tasks:
+    - name: Load the server role defaults and the fleet contract
+      ansible.builtin.include_vars:
+        file: "{{ item }}"
+      loop:
+        - "{{ playbook_dir }}/../inventories/production/group_vars/all.yml"
+        - "{{ playbook_dir }}/../roles/observability_server/defaults/main.yml"
+
+    # set_fact outranks include_vars, which would otherwise derive these
+    # from an inventory this playbook does not have.
+    - name: Choose whether the LLM dashboards and rules are rendered
+      ansible.builtin.set_fact:
+        grafana_llm_dashboards_enabled: "{{ render_llm | bool }}"
+        grafana_llm_alerts_enabled: "{{ render_llm | bool }}"
+
+    - name: Create the output directory
+      ansible.builtin.file:
+        path: "{{ render_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Render dashboards
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../roles/observability_server/templates/{{ item.template }}.json.j2"
+        dest: "{{ render_dir }}/{{ item.file | default(item.template) }}.json"
+        mode: '0644'
+      loop: "{{ observability_server_dashboards | rejectattr('llm') | list
+                + (observability_server_dashboards | selectattr('llm') | list if render_llm | bool else []) }}"
+
+    - name: Render alert rules
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../roles/observability_server/templates/{{ item }}.yml.j2"
+        dest: "{{ render_dir }}/{{ item }}.yml"
+        mode: '0644'
+      loop:
+        - llm_alerts
+        - fleet_alerts

@@ -9,3 +9,12 @@ data = {{ var_dir }}/grafana
 logs = {{ log_dir }}
 plugins = {{ var_dir }}/grafana/plugins
 provisioning = {{ etc_dir }}/grafana/provisioning
+
+[dashboards]
+# Observability Home (templates/home.json.j2) replaces Grafana's welcome page.
+default_home_dashboard_path = {{ etc_dir }}/grafana/provisioning/dashboards/Platform/home.json
+
+[analytics]
+reporting_enabled = false
+check_for_updates = false
+check_for_plugin_updates = false

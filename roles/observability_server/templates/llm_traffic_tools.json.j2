@@ -1,0 +1,90 @@
+{#- Managed by Ansible. LLM Traffic, Tools and Outcomes: what clients ask for and
+    how responses end. Response kinds, finish reasons and tool names come from
+    the MLX telemetry agent 1.3.0+ (mlx_responses_total,
+    mlx_tool_calls_by_tool_total); older agents leave those panels empty.
+    Metric definitions: docs/LLM_OBSERVABILITY.md. -#}
+{% import 'dashboard_macros.j2' as m %}
+{% set F = 'host_name=~"$host", model=~"$model", framework=~"$framework"' %}
+{% set T = F ~ ', tool=~"$tool"' %}
+{% set R = '[$__range]' %}
+{% set ri = '[$__rate_interval]' %}
+{% set kind_colors = [
+  {"matcher": {"id": "byName", "options": "chat"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "blue"}}]},
+  {"matcher": {"id": "byName", "options": "reasoning"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "purple"}}]},
+  {"matcher": {"id": "byName", "options": "tool_call"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "orange"}}]},
+  {"matcher": {"id": "byName", "options": "completion"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}]}] %}
+{% set finish_colors = [
+  {"matcher": {"id": "byName", "options": "stop"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}]},
+  {"matcher": {"id": "byName", "options": "length"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]},
+  {"matcher": {"id": "byName", "options": "tool_calls"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "orange"}}]}] %}
+{
+  {{ m.header(grafana_llm_traffic_dashboard_uid, "LLM Traffic, Tools and Outcomes",
+      "What clients ask the MLX servers for and how responses end: request mix by kind, finish reasons (including truncation), tool calls per function, status codes and token volume. Only requests through the telemetry proxy are measured.",
+      ["llm", "mlx", "tools"],
+      [{"title": "LLM Cluster Overview", "url": "/d/" ~ grafana_llm_overview_dashboard_uid, "vars": true},
+       {"title": "LLM Service Levels", "url": "/d/" ~ grafana_llm_slo_dashboard_uid}]) }},
+  "templating": {
+    "list": [
+      {{ m.query_var("host", "Host", "label_values(mlx_telemetry_info, host_name)", "Macs that run the MLX telemetry agent.") }},
+      {{ m.query_var("model", "Model", "label_values(mlx_model_info{host_name=~\"$host\"}, model)", "Models reported by the agents.") }},
+      {{ m.framework_var('host_name=~"$host"') }},
+      {{ m.query_var("tool", "Tool", "label_values(mlx_tool_calls_by_tool_total{host_name=~\"$host\"}, tool)", "Function names the models have called (sanitised; names beyond llm_tool_label_max_values are 'other'). New tools appear here as soon as they are first called.") }}
+    ]
+  },
+  "panels": [
+    {{ m.row(1, "Summary (selected time range)", 0) }},
+    {{ m.stat(2, "Requests", 'sum(increase(mlx_requests_total{' ~ F ~ '}' ~ R ~ '))', 0, 1, w=4, decimals=0, desc="Proxied inference requests in the selected range, every outcome.", no_value="No proxy telemetry") }},
+    {{ m.stat(3, "Successful responses", 'sum(increase(mlx_responses_total{' ~ F ~ '}' ~ R ~ '))', 4, 1, w=4, decimals=0, desc="Successful responses classified by kind and finish reason (agent 1.3.0+).", no_value="No responses") }},
+    {{ m.stat(4, "Tool calls", 'sum(increase(mlx_tool_calls_total{' ~ F ~ '}' ~ R ~ '))', 8, 1, w=4, decimals=0, desc="Tool calls returned by the models in the selected range.", no_value="0") }},
+    {{ m.stat(5, "Distinct tools called", 'count(sum by (tool) (increase(mlx_tool_calls_by_tool_total{' ~ F ~ '}' ~ R ~ ')) > 0)', 12, 1, w=4, decimals=0, desc="Function names called at least once in the selected range.", no_value="0") }},
+    {{ m.stat(6, "Truncated (finish_reason=length)", '100 * (sum(increase(mlx_responses_total{' ~ F ~ ', finish_reason="length"}' ~ R ~ ')) or vector(0)) / sum(increase(mlx_responses_total{' ~ F ~ '}' ~ R ~ '))', 16, 1, w=4, unit="percent", decimals=1, spec=[["green", None], ["orange", 5], ["red", 20]],
+        desc="Share of responses that stopped because they hit max_tokens or the context limit. A high share means clients' max_tokens is too low or answers are running away.", no_value="No responses") }},
+    {{ m.stat(7, "Reasoning responses", '100 * (sum(increase(mlx_responses_total{' ~ F ~ ', kind="reasoning"}' ~ R ~ ')) or vector(0)) / sum(increase(mlx_responses_total{' ~ F ~ '}' ~ R ~ '))', 20, 1, w=4, unit="percent", decimals=1,
+        desc="Share of responses that carried reasoning (thinking) text and no tool call.", no_value="No responses") }},
+
+    {{ m.row(8, "Request mix", 5) }},
+    {{ m.ts(9, "Responses / min by kind", [{"expr": 'sum by (kind) (rate(mlx_responses_total{' ~ F ~ '}' ~ ri ~ ')) * 60', "legend": m.lg('kind')}], 0, 6, w=8, stack=true, min=0, overrides=kind_colors,
+        desc="chat = plain answer, reasoning = answer with thinking text, tool_call = the model called a tool, completion = legacy /v1/completions.", no_value="No responses") }},
+    {{ m.ts(10, "Requests / min by mode", [{"expr": 'sum by (stream, endpoint) (rate(mlx_requests_total{' ~ F ~ '}' ~ ri ~ ')) * 60', "legend": m.lg('endpoint') ~ " stream=" ~ m.lg('stream')}], 8, 6, w=8, stack=true, min=0,
+        desc="Streaming vs non-streaming, chat vs legacy completions, every outcome.", no_value="No proxy telemetry") }},
+    {{ m.ts(11, "Requests in flight", [{"expr": 'sum by (host_name) (mlx_requests_active{host_name=~"$host", framework=~"$framework"})', "legend": m.lg('host_name')}], 16, 6, w=8, min=0, decimals=0,
+        desc="Concurrent requests through each proxy. MLX servers process requests largely one at a time, so sustained values above 1 mean queueing.", no_value="No proxy telemetry") }},
+
+    {{ m.row(12, "Outcomes", 14) }},
+    {{ m.ts(13, "Finish reasons / min", [{"expr": 'sum by (finish_reason) (rate(mlx_responses_total{' ~ F ~ '}' ~ ri ~ ')) * 60', "legend": m.lg('finish_reason')}], 0, 15, w=8, stack=true, min=0, overrides=finish_colors,
+        desc="Why responses ended: stop (natural end or stop word), length (max_tokens or context limit), tool_calls, other. none = the server sent no finish_reason.", no_value="No responses") }},
+    {{ m.ts(14, "Outcomes / min", [{"expr": 'sum by (outcome) (rate(mlx_requests_total{' ~ F ~ '}' ~ ri ~ ')) * 60', "legend": m.lg('outcome')}], 8, 15, w=8, stack=true, min=0,
+        desc="success, client_error (4xx), server_error (5xx or an error event in a stream), upstream_error (server unreachable or stream cut), timeout, client_disconnected.", no_value="No proxy telemetry",
+        overrides=[{"matcher": {"id": "byName", "options": "success"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}]}, {"matcher": {"id": "byRegexp", "options": "server_error|upstream_error|timeout"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]}]) }},
+    {{ m.ts(15, "Truncation rate", [{"expr": '100 * (sum by (model) (rate(mlx_responses_total{' ~ F ~ ', finish_reason="length"}' ~ ri ~ ')) or 0 * sum by (model) (rate(mlx_responses_total{' ~ F ~ '}' ~ ri ~ '))) / sum by (model) (rate(mlx_responses_total{' ~ F ~ '}' ~ ri ~ '))', "legend": m.lg('model')}], 16, 15, w=8, unit="percent", min=0,
+        desc="Share of responses cut off by max_tokens or the context limit, per model.", no_value="No responses") }},
+    {{ m.table(16, "Status codes (selected range)", [{"expr": 'sort_desc(sum by (status_code, outcome) (increase(mlx_requests_total{' ~ F ~ '}' ~ R ~ ')))'}], 0, 23, w=8, h=8,
+        desc="Requests by HTTP status code returned to clients (0 = no response: unreachable server or client hang-up).", no_value="No proxy telemetry",
+        organize={"excludeByName": {"Time": true}, "renameByName": {"status_code": "Status", "outcome": "Outcome", "Value": "Requests"}},
+        overrides=[{"matcher": {"id": "byName", "options": "Requests"}, "properties": [{"id": "decimals", "value": 0}]}]) }},
+    {{ m.table(17, "Responses by kind and finish reason (selected range)", [{"expr": 'sort_desc(sum by (kind, finish_reason, stream) (increase(mlx_responses_total{' ~ F ~ '}' ~ R ~ ')))'}], 8, 23, w=16, h=8,
+        desc="Successful responses broken down by kind, finish reason and streaming mode.", no_value="No responses",
+        organize={"excludeByName": {"Time": true}, "renameByName": {"kind": "Kind", "finish_reason": "Finish reason", "stream": "Streaming", "Value": "Responses"}},
+        overrides=[{"matcher": {"id": "byName", "options": "Responses"}, "properties": [{"id": "decimals", "value": 0}]}]) }},
+
+    {{ m.row(18, "Tool calls", 31) }},
+    {{ m.ts(19, "Tool calls / min by tool", [{"expr": 'sum by (tool) (rate(mlx_tool_calls_by_tool_total{' ~ T ~ '}' ~ ri ~ ')) * 60', "legend": m.lg('tool')}], 0, 32, w=12, stack=true, min=0,
+        desc="Function calls per tool name. Use the Tool variable to focus on some tools.", no_value="No tool calls") }},
+    {{ m.ts(20, "Tool-call responses share", [{"expr": '100 * (sum by (model) (rate(mlx_responses_total{' ~ F ~ ', kind="tool_call"}' ~ ri ~ ')) or 0 * sum by (model) (rate(mlx_responses_total{' ~ F ~ '}' ~ ri ~ '))) / sum by (model) (rate(mlx_responses_total{' ~ F ~ '}' ~ ri ~ '))', "legend": m.lg('model')}], 12, 32, w=12, unit="percent", min=0, max=100,
+        desc="Share of responses in which the model called at least one tool, per model.", no_value="No responses") }},
+    {{ m.table(21, "All tools called (selected range)", [{"expr": 'sort_desc(sum by (tool) (increase(mlx_tool_calls_by_tool_total{' ~ T ~ '}' ~ R ~ ')) > 0)'}, {"expr": '100 * sum by (tool) (increase(mlx_tool_calls_by_tool_total{' ~ T ~ '}' ~ R ~ ')) / scalar(sum(increase(mlx_tool_calls_by_tool_total{' ~ F ~ '}' ~ R ~ ')))'}], 0, 40, w=12, h=9,
+        desc="Every function name called in the range, with its share of all tool calls. 'other' collects names beyond llm_tool_label_max_values; 'unknown' = a call without a function name.", no_value="No tool calls",
+        organize={"excludeByName": {"Time": true}, "renameByName": {"tool": "Tool", "Value #A": "Calls", "Value #B": "Share %"}},
+        overrides=[{"matcher": {"id": "byName", "options": "Calls"}, "properties": [{"id": "decimals", "value": 0}]}, {"matcher": {"id": "byName", "options": "Share %"}, "properties": [{"id": "unit", "value": "percent"}, {"id": "decimals", "value": 1}, {"id": "custom.cellOptions", "value": {"type": "gauge", "mode": "basic"}}, {"id": "max", "value": 100}, {"id": "min", "value": 0}]}]) }},
+    {{ m.bargauge(22, "Top tools (selected range)", [{"expr": 'topk(10, sum by (tool) (increase(mlx_tool_calls_by_tool_total{' ~ T ~ '}' ~ R ~ ')) > 0)', "legend": m.lg('tool')}], 12, 40, w=12, h=9, decimals=0,
+        desc="The ten most-called tools in the selected range.", no_value="No tool calls", spec=[["blue", None]]) }},
+
+    {{ m.row(23, "Tokens", 49) }},
+    {{ m.ts(24, "Tokens / min", [{"expr": 'sum(rate(mlx_tokens_prompt_total{' ~ F ~ '}' ~ ri ~ ')) * 60', "legend": "prompt"}, {"expr": 'sum(rate(mlx_tokens_prompt_cached_total{' ~ F ~ '}' ~ ri ~ ')) * 60', "legend": "prompt (from cache)"}, {"expr": 'sum(rate(mlx_tokens_completion_total{' ~ F ~ '}' ~ ri ~ ')) * 60', "legend": "completion"}], 0, 50, w=8, min=0,
+        desc="Token volume reported in the servers' usage blocks. Cached = prompt tokens served from the prompt (KV) cache.", no_value="No usage reported") }},
+    {{ m.ts(25, "Tokens per request", [{"expr": 'histogram_quantile(0.5, sum by (le) (rate(mlx_request_prompt_tokens_bucket{' ~ F ~ '}' ~ ri ~ ')))', "legend": "prompt p50"}, {"expr": 'histogram_quantile(0.95, sum by (le) (rate(mlx_request_prompt_tokens_bucket{' ~ F ~ '}' ~ ri ~ ')))', "legend": "prompt p95"}, {"expr": 'histogram_quantile(0.5, sum by (le) (rate(mlx_request_completion_tokens_bucket{' ~ F ~ '}' ~ ri ~ ')))', "legend": "completion p50"}, {"expr": 'histogram_quantile(0.95, sum by (le) (rate(mlx_request_completion_tokens_bucket{' ~ F ~ '}' ~ ri ~ ')))', "legend": "completion p95"}], 8, 50, w=8, min=0,
+        desc="Prompt and completion size per request (bucketed histograms: values are bucket estimates).", no_value="No usage reported") }},
+    {{ m.ts(26, "Prompt-cache reuse", [{"expr": '100 * sum(rate(mlx_tokens_prompt_cached_total{' ~ F ~ '}' ~ ri ~ ')) / sum(rate(mlx_tokens_prompt_total{' ~ F ~ '}' ~ ri ~ '))', "legend": "cached share of prompt tokens"}], 16, 50, w=8, unit="percent", min=0, max=100,
+        desc="Share of prompt tokens the server did not have to process again because they were in its prompt cache. Agentic clients that resend a growing conversation benefit most.", no_value="No usage reported") }}
+  ]
+}

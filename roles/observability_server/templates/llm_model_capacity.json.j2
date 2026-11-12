@@ -1,0 +1,98 @@
+{#- Managed by Ansible. LLM Model, Capacity and Confidence: what each node serves
+    (architecture from the model's config.json), how much memory the model and
+    its KV cache need against what the Mac has, context use, KV cache from every
+    source, and token confidence from logprobs. Agent 1.3.0+ for the
+    architecture, weights, KV-per-token, MLX-LM KV and confidence series.
+    Metric definitions: docs/LLM_OBSERVABILITY.md. -#}
+{% import 'dashboard_macros.j2' as m %}
+{% set H = 'host_name=~"$host"' %}
+{% set HM = 'host_name=~"$host", model=~"$model"' %}
+{% set F = 'host_name=~"$host", model=~"$model", framework=~"$framework"' %}
+{% set ri = '[$__rate_interval]' %}
+{% set conf0 = ' or on() (0 * sum(mlx_telemetry_info{' ~ H ~ ', confidence="enabled"}))' %}
+{%- macro arch(id, title, attr, x, desc) -%}
+{{ m.stat(id, title, 'max(mlx_model_config{' ~ HM ~ ', attr="' ~ attr ~ '"})', x, 1, w=2, h=5, decimals=0, desc=desc, no_value="Unknown") }}
+{%- endmacro %}
+{
+  {{ m.header(grafana_llm_model_dashboard_uid, "LLM Model, Capacity and Confidence",
+      "What each node serves and whether it fits: model architecture, weights and KV-cache sizing against the Mac's memory, context use, KV cache from every source, and token confidence from logprobs.",
+      ["llm", "mlx", "capacity"],
+      [{"title": "LLM Cluster Overview", "url": "/d/" ~ grafana_llm_overview_dashboard_uid, "vars": true},
+       {"title": "LLM Performance, KV Cache and Quality", "url": "/d/" ~ grafana_llm_performance_dashboard_uid, "vars": true}]) }},
+  "templating": {
+    "list": [
+      {{ m.query_var("host", "Host", "label_values(mlx_telemetry_info, host_name)", "Macs that run the MLX telemetry agent.") }},
+      {{ m.query_var("model", "Model", "label_values(mlx_model_info{host_name=~\"$host\"}, model)", "Models reported by the agents.") }},
+      {{ m.framework_var('host_name=~"$host"') }}
+    ]
+  },
+  "panels": [
+    {{ m.row(1, "Model architecture (from config.json)", 0) }},
+    {{ m.stat(2, "Architecture", 'max by (architecture, model_type, quantization) (mlx_model_architecture{' ~ HM ~ '})', 0, 1, w=6, h=5, text_mode="name", legend=m.lg('architecture') ~ " · " ~ m.lg('model_type') ~ " · " ~ m.lg('quantization'),
+        desc="architectures[0], model_type and weight quantisation from the served model's config.json. Needs the agent to find config.json (mlx_model_path, or a Hugging Face repo in the local hub cache).", no_value="config.json not found", spec=[["blue", None]]) }},
+    {{ arch(3, "Layers", "layers", 6, "num_hidden_layers") }},
+    {{ arch(4, "Attention heads", "attention_heads", 8, "num_attention_heads") }},
+    {{ arch(5, "KV heads", "kv_heads", 10, "num_key_value_heads (grouped-query attention); equals attention heads when the config has none") }},
+    {{ arch(6, "Head dim", "head_dim", 12, "head_dim, or hidden_size / attention heads") }},
+    {{ arch(7, "Hidden size", "hidden_size", 14, "hidden_size") }},
+    {{ arch(8, "FFN size", "intermediate_size", 16, "intermediate_size of the feed-forward blocks") }},
+    {{ arch(9, "Vocabulary", "vocab_size", 18, "vocab_size") }},
+    {{ arch(10, "Quant bits", "quant_bits", 20, "Weight quantisation bits (quantization.bits); empty for unquantised models") }},
+    {{ arch(11, "Quant group", "quant_group_size", 22, "Quantisation group size") }},
+    {{ m.stat(12, "Max context", 'max(mlx_model_context_length_max{' ~ HM ~ '})', 6, 6, w=4, h=4, unit="short", decimals=0, desc="max_position_embeddings from config.json, or llm_model_max_context_tokens.", no_value="Unknown") }},
+    {{ m.stat(13, "Weights on disk", 'max(mlx_model_weights_size_bytes{' ~ HM ~ '})', 10, 6, w=4, h=4, unit="bytes", decimals=2, desc="Size of the model's *.safetensors files. The weights are loaded into unified memory, so this is the floor of the server's footprint.", no_value="Unknown") }},
+    {{ m.stat(14, "KV cache per token (est.)", 'max(mlx_model_kv_cache_per_token_bytes{' ~ HM ~ '})', 14, 6, w=5, h=4, unit="bytes", decimals=0,
+        desc="2 (K and V) x layers x KV heads x head dim x 2 bytes: an fp16 KV cache with full attention. Sliding-window, linear-attention or quantised KV caches need less.", no_value="Unknown") }},
+    {{ m.stat(15, "KV cache at max context (est.)", 'max(mlx_model_kv_cache_per_token_bytes{' ~ HM ~ '} * on (host_name, model) group_left mlx_model_context_length_max{' ~ HM ~ '})', 19, 6, w=5, h=4, unit="bytes", decimals=2,
+        desc="KV cache one sequence needs at the model's maximum context: KV per token x max context.", no_value="Unknown") }},
+    {{ m.text(16, "", "Architecture figures are read once per model from its `config.json` by the telemetry agent on each node. The KV estimates assume an fp16 cache with full attention on every layer, which is an **upper bound** for models with sliding-window or linear attention.", 0, 6, w=6, h=4) }},
+
+    {{ m.row(17, "Memory fit per node", 10) }},
+    {{ m.table(18, "Model memory vs node memory", [
+        {"expr": 'max by (host_name) (mlx_model_weights_size_bytes{' ~ HM ~ '})'},
+        {"expr": 'max by (host_name) (mlx_process_memory_footprint_bytes{' ~ H ~ ', framework=~"$framework"})'},
+        {"expr": 'sum by (host_name) (system_memory_usage_bytes{' ~ H ~ '})'},
+        {"expr": '100 * sum by (host_name) (system_memory_usage_bytes{state="used", ' ~ H ~ '}) / sum by (host_name) (system_memory_usage_bytes{' ~ H ~ '})'},
+        {"expr": 'sum by (host_name) (system_memory_usage_bytes{state=~"free|inactive", ' ~ H ~ '}) / on (host_name) group_left max by (host_name) (mlx_model_kv_cache_per_token_bytes{' ~ HM ~ '})'},
+        {"expr": 'sum by (host_name) (system_memory_usage_bytes{state=~"free|inactive", ' ~ H ~ '}) / on (host_name) group_left max by (host_name) (mlx_model_kv_cache_per_token_bytes{' ~ HM ~ '} * on (host_name, model) group_left mlx_model_context_length_max{' ~ HM ~ '})'}], 0, 11, h=8,
+        desc="Per node: weights, the server's physical footprint (weights + KV cache + buffers), the Mac's memory, and how much more KV cache fits in currently free and inactive (reclaimable) memory, as tokens and as full-context sequences. A planning estimate, not a guarantee: macOS also limits how much unified memory the GPU may wire.",
+        no_value="No LLM telemetry",
+        organize={"excludeByName": {"Time": true}, "renameByName": {"host_name": "Node", "Value #A": "Weights", "Value #B": "Server footprint", "Value #C": "Node memory", "Value #D": "Memory used %", "Value #E": "KV tokens that still fit", "Value #F": "Full-context sequences that fit"}},
+        overrides=[{"matcher": {"id": "byRegexp", "options": "Weights|Server footprint|Node memory"}, "properties": [{"id": "unit", "value": "bytes"}, {"id": "decimals", "value": 1}]},
+                   {"matcher": {"id": "byName", "options": "Memory used %"}, "properties": [{"id": "unit", "value": "percent"}, {"id": "decimals", "value": 1}, {"id": "custom.cellOptions", "value": {"type": "gauge", "mode": "basic"}}, {"id": "min", "value": 0}, {"id": "max", "value": 100}, {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "green", "value": None}, {"color": "orange", "value": 80}, {"color": "red", "value": 90}]}}]},
+                   {"matcher": {"id": "byName", "options": "KV tokens that still fit"}, "properties": [{"id": "unit", "value": "short"}, {"id": "decimals", "value": 0}]},
+                   {"matcher": {"id": "byName", "options": "Full-context sequences that fit"}, "properties": [{"id": "decimals", "value": 2}, {"id": "custom.cellOptions", "value": {"type": "color-text"}}, {"id": "thresholds", "value": {"mode": "absolute", "steps": [{"color": "red", "value": None}, {"color": "orange", "value": 1}, {"color": "green", "value": 2}]}}]},
+                   {"matcher": {"id": "byName", "options": "Node"}, "properties": [{"id": "links", "value": [{"title": "Open ${__value.raw} in LLM Node Detail", "url": "/d/" ~ grafana_llm_node_dashboard_uid ~ "?var-host=${__value.raw:percentencode}&${__url_time_range}"}]}]}]) }},
+    {{ m.ts(19, "Server footprint vs weights", [{"expr": 'max by (host_name) (mlx_process_memory_footprint_bytes{' ~ H ~ ', framework=~"$framework"})', "legend": m.lg('host_name') ~ " footprint"}, {"expr": 'max by (host_name) (mlx_model_weights_size_bytes{' ~ HM ~ '})', "legend": m.lg('host_name') ~ " weights"}], 0, 19, w=12, unit="bytes", min=0,
+        desc="The footprint above the weights is mostly KV cache and activation buffers; it grows with context length and cached sequences.", no_value="Server process not found") }},
+    {{ m.ts(20, "GPU memory in use", [{"expr": 'max by (host_name) (macos_gpu_memory_in_use_bytes{' ~ H ~ '})', "legend": m.lg('host_name') ~ " in use"}, {"expr": 'max by (host_name) (macos_gpu_memory_allocated_bytes{' ~ H ~ '})', "legend": m.lg('host_name') ~ " allocated"}], 12, 19, w=12, unit="bytes", min=0,
+        desc="Unified memory the GPU driver reports in use and allocated (IORegistry).", no_value="GPU memory not collected") }},
+
+    {{ m.row(21, "Context use", 27) }},
+    {{ m.ts(22, "Context tokens per request", [{"expr": 'histogram_quantile(0.5, sum by (le) (rate(mlx_request_context_tokens_bucket{' ~ F ~ '}' ~ ri ~ ')))', "legend": "p50"}, {"expr": 'histogram_quantile(0.95, sum by (le) (rate(mlx_request_context_tokens_bucket{' ~ F ~ '}' ~ ri ~ ')))', "legend": "p95"}, {"expr": 'max(mlx_model_context_length_max{' ~ HM ~ '})', "legend": "max context"}], 0, 28, w=12, min=0,
+        desc="Prompt + completion tokens per request against the model's maximum context.", no_value="No usage reported",
+        overrides=[{"matcher": {"id": "byName", "options": "max context"}, "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}]}]) }},
+    {{ m.ts(23, "Context utilisation", [{"expr": '100 * histogram_quantile(0.5, sum by (le) (rate(mlx_request_context_utilization_bucket{' ~ F ~ '}' ~ ri ~ ')))', "legend": "p50"}, {"expr": '100 * histogram_quantile(0.95, sum by (le) (rate(mlx_request_context_utilization_bucket{' ~ F ~ '}' ~ ri ~ ')))', "legend": "p95"}], 12, 28, w=12, unit="percent", min=0,
+        desc="Context tokens / maximum context, per request. Above ~80% prompts risk truncation and the KV cache is at its largest.", no_value="Max context unknown or no usage") }},
+
+    {{ m.row(24, "KV cache (MLX-LM log, MLX-VLM prefix cache, OMLX)", 36) }},
+    {{ m.kv_stats(25, 0, 37, H) }},
+    {{ m.kv_timeseries(31, 0, 41, H) }},
+
+    {{ m.row(34, "Token confidence (logprobs)", 49) }},
+    {{ m.text(35, "", "How **sure** the model was of the tokens it sampled, from their log-probabilities: not whether the answer is right. Scored when the client asks for `logprobs`, or on every non-streaming MLX-LM request with `llm_confidence_inject_logprobs`. MLX-LM returns no logprobs on streams, so streaming traffic is not scored. Enable with `llm_confidence_metrics_enabled`.", 0, 50, w=24, h=2) }},
+    {{ m.stat(36, "Scored responses", 'sum(increase(mlx_confidence_scored_total{' ~ F ~ '}[$__range]))' ~ conf0, 0, 52, w=4, decimals=0, desc="Responses scored from token logprobs in the selected range.", no_value="Confidence disabled") }},
+    {{ m.stat(37, "Scoring coverage", '100 * sum(increase(mlx_confidence_scored_total{' ~ F ~ '}[$__range])) / sum(increase(mlx_responses_total{' ~ F ~ '}[$__range]))', 4, 52, w=4, unit="percent", decimals=1, desc="Scored responses / successful responses. Streaming responses cannot be scored.", no_value="Confidence disabled") }},
+    {{ m.stat(38, "Mean token probability (median)", 'histogram_quantile(0.5, sum by (le) (rate(mlx_confidence_mean_token_probability_bucket{' ~ F ~ '}[$__range])))', 8, 52, w=4, unit="percentunit", decimals=1, spec=[["red", None], ["orange", 0.7], ["green", 0.85]], desc="Median over responses of the mean probability of the sampled tokens.", no_value="No scored responses") }},
+    {{ m.stat(39, "Perplexity p95", 'histogram_quantile(0.95, sum by (le) (rate(mlx_confidence_perplexity_bucket{' ~ F ~ '}[$__range])))', 12, 52, w=4, decimals=2, spec=[["green", None], ["orange", 3], ["red", 10]], desc="exp(-mean token logprob) per response; 1 = the model was certain of every token.", no_value="No scored responses") }},
+    {{ m.stat(40, "Low-confidence responses", '100 * sum(increase(mlx_confidence_low_confidence_responses_total{' ~ F ~ '}[$__range])) / sum(increase(mlx_confidence_scored_total{' ~ F ~ '}[$__range]))', 16, 52, w=4, unit="percent", decimals=1, spec=[["green", None], ["orange", 10], ["red", 25]],
+        desc="Scored responses in which at least llm_confidence_low_response_ratio of the tokens had a probability below llm_confidence_low_token_probability.", no_value="No scored responses") }},
+    {{ m.stat(41, "Scored / min", 'sum(rate(mlx_confidence_scored_total{' ~ F ~ '}[5m])) * 60' ~ conf0, 20, 52, w=4, decimals=1, desc="Current scoring rate.", no_value="Confidence disabled") }},
+    {{ m.ts(42, "Token probability", [{"expr": 'histogram_quantile(0.5, sum by (le) (rate(mlx_confidence_mean_token_probability_bucket{' ~ F ~ '}' ~ ri ~ ')))', "legend": "mean token p50"}, {"expr": 'histogram_quantile(0.1, sum by (le) (rate(mlx_confidence_mean_token_probability_bucket{' ~ F ~ '}' ~ ri ~ ')))', "legend": "mean token p10"}, {"expr": 'histogram_quantile(0.5, sum by (le) (rate(mlx_confidence_min_token_probability_bucket{' ~ F ~ '}' ~ ri ~ ')))', "legend": "weakest token p50"}], 0, 56, w=8, unit="percentunit", min=0, max=1,
+        desc="Distribution over responses of the mean and of the lowest sampled-token probability. A falling p10 means more responses the model was unsure about.", no_value="No scored responses") }},
+    {{ m.ts(43, "Perplexity", [{"expr": 'histogram_quantile(0.5, sum by (le) (rate(mlx_confidence_perplexity_bucket{' ~ F ~ '}' ~ ri ~ ')))', "legend": "p50"}, {"expr": 'histogram_quantile(0.95, sum by (le) (rate(mlx_confidence_perplexity_bucket{' ~ F ~ '}' ~ ri ~ ')))', "legend": "p95"}], 8, 56, w=8, min=1,
+        desc="Per-response perplexity of the model's own output.", no_value="No scored responses") }},
+    {{ m.ts(44, "Low-confidence responses / min", [{"expr": 'sum by (model) (rate(mlx_confidence_low_confidence_responses_total{' ~ F ~ '}' ~ ri ~ ')) * 60', "legend": m.lg('model')}, {"expr": 'sum by (source) (rate(mlx_confidence_scored_total{' ~ F ~ '}' ~ ri ~ ')) * 60', "legend": "scored (" ~ m.lg('source') ~ ")"}], 16, 56, w=8, min=0,
+        desc="Low-confidence responses against all scored responses, by how the logprobs were obtained (client = requested by the client, injected = requested by the proxy).", no_value="No scored responses") }}
+  ]
+}

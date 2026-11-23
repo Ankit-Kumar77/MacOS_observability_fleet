@@ -379,6 +379,37 @@
         {"id": "merge", "options": {}},
         {"id": "organize", "options": {"excludeByName": {"Time": true, "os_type": true, "ssh_session_id": true}, "indexByName": {"host_name": 0, "user_name": 1, "source_address": 2, "ssh_session_tty": 3, "Value #A": 4, "Value #B": 5}}}
       ]
+    },
+    {
+      "id": 12,
+      "type": "state-timeline",
+      "title": "SSH Connectivity Timeline",
+      "description": "SSH Service state per Mac over time: UP (green) when sshd answered with an SSH protocol banner on loopback, DOWN (red) when it did not, Unknown (gray) when no SSH state snapshot arrived for more than 2 minutes (collector stopped, LaunchAgent not running, Mac off or unreachable). Uses ssh_service_up rather than the port metric because launchd holds port 22 open even when sshd itself is broken. Refreshed every otel_ssh_check_interval by the SSH state LaunchAgent.",
+      "datasource": {{ ds | tojson }},
+      "gridPos": {"x": 0, "y": 50, "w": 24, "h": 8},
+      "interval": "30s",
+      "options": {"showValue": "never", "mergeValues": true, "alignValue": "left", "rowHeight": 0.9, "legend": {"showLegend": true, "displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single", "sort": "none"}},
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"fillOpacity": 85, "lineWidth": 0, "insertNulls": 120000, "spanNulls": false},
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]},
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "DOWN", "color": "red", "index": 0}, "1": {"text": "UP", "color": "green", "index": 1}}},
+            {"type": "special", "options": {"match": "null+nan", "result": {"text": "Unknown", "color": "#8e8e8e", "index": 2}}}
+          ],
+          "links": {{ series_links | tojson }}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {{ ds | tojson }},
+          "expr": "max by (host_name) (ssh_service_up{host_name=~\"$host_name\"})",
+          "legendFormat": "{{ '{{' }}host_name{{ '}}' }}"
+        }
+      ]
     }
   ]
 }
